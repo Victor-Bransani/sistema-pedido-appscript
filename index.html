@@ -2509,20 +2509,30 @@
         // =================================================================
         function initializeMainApp() {
             console.log('🎯 Inicializando aplicação principal...');
-            
             if (DOM.loginModal) DOM.loginModal.classList.add('hidden');
             if (DOM.appWrapper) DOM.appWrapper.classList.remove('hidden');
-            
-            setupUserInterface();
-            setupNavigation();
-            setupEventListeners();
-            loadInitialData();
-            
-            // Show dashboard by default
-            showSection('dashboard-section', 'Dashboard');
-            if (DOM.dashboardBtn) DOM.dashboardBtn.classList.add('active');
-            
-            feather.replace();
+            // Loader só aparece se demorar >300ms
+            let loaderTimeout = setTimeout(() => showLoader(true, 'Carregando dados...'), 300);
+            google.script.run
+              .withSuccessHandler(initialData => {
+                clearTimeout(loaderTimeout);
+                showLoader(false);
+                if (initialData) {
+                  AppState.user = initialData.user;
+                  setupUserInterface();
+                  renderDashboardStats(initialData.dashboardStats);
+                  renderRecentOrders(initialData.recentOrders);
+                  renderStatusChart(initialData.dashboardStats);
+                  handleNotifications(initialData.notifications);
+                }
+                setupNavigation();
+                setupEventListeners();
+                feather.replace();
+                showSection('dashboard-section', 'Dashboard');
+                if (DOM.dashboardBtn) DOM.dashboardBtn.classList.add('active');
+              })
+              .withFailureHandler(handleError)
+              .getInitialAppData();
         }
 
         function setupUserInterface() {
@@ -2974,8 +2984,7 @@
         // DATA LOADING FUNCTIONS
         // =================================================================
         function loadInitialData() {
-            loadDashboard();
-            loadNotifications();
+            // Não usado mais, substituído por getInitialAppData
         }
 
         function loadDashboard() {
@@ -3157,110 +3166,45 @@
                 receiver: DOM.receiverSearch,
                 retirador: DOM.retiradorSearch
             };
-            
             const statusFilters = {
                 buyer: DOM.buyerStatusFilter,
                 receiver: DOM.receiverStatusFilter,
                 retirador: DOM.retiradorStatusFilter
             };
-            
             const priorityFilters = {
                 buyer: DOM.buyerPriorityFilter,
                 receiver: DOM.receiverPriorityFilter,
                 retirador: DOM.retiradorPriorityFilter
             };
-            
             const containers = {
                 buyer: DOM.buyerOrdersContainer,
                 receiver: DOM.receiverOrdersContainer,
                 retirador: DOM.retiradorOrdersContainer
             };
-            
             const searchTerm = searchInputs[section]?.value || '';
             const statusFilter = statusFilters[section]?.value || '';
             const priorityFilter = priorityFilters[section]?.value || '';
-            
             const filters = {};
             if (statusFilter) filters.status = statusFilter;
             if (priorityFilter) filters.prioridade = priorityFilter;
-            
-            showLoader(true, 'Buscando pedidos...');
-            
+            // Loader só aparece se demorar >300ms
+            let loaderTimeout = setTimeout(() => showLoader(true, 'Buscando pedidos...'), 300);
             google.script.run
-                .withSuccessHandler(pedidos => {
-                    renderOrdersGrid(pedidos, containers[section], section);
+                .withSuccessHandler(html => {
+                    clearTimeout(loaderTimeout);
                     showLoader(false);
+                    const container = containers[section];
+                    if (container) {
+                        container.innerHTML = html;
+                        feather.replace(); // Garante que os ícones feather são renderizados
+                    }
                 })
-                .withFailureHandler(handleError)
+                .withFailureHandler(error => {
+                    clearTimeout(loaderTimeout);
+                    showLoader(false);
+                    handleError(error);
+                })
                 .searchPedidos(searchTerm, filters);
-        }
-
-        function renderOrdersGrid(orders, container, section) {
-            if (!container) return;
-            
-            if (!orders || orders.length === 0) {
-                container.innerHTML = '<div class="col-span-full text-center text-gray-500 py-8">Nenhum pedido encontrado</div>';
-                return;
-            }
-            
-            AppState.pedidos = orders;
-            
-            container.innerHTML = orders.map(order => {
-                const actions = getOrderActions(order, section);
-                return `
-                    <div class="order-card">
-                        <div class="order-header">
-                            <h4 class="order-number">Pedido #${order.NumeroPedidoPDF || 'S/N'}</h4>
-                            ${getStatusBadge(order.Status)}
-                        </div>
-                        <div class="order-body">
-                            <div class="order-info">
-                                <div class="order-info-item">
-                                    <span class="order-info-label">Fornecedor:</span>
-                                    <span class="order-info-value">${order.Fornecedor}</span>
-                                </div>
-                                <div class="order-info-item">
-                                    <span class="order-info-label">CNPJ:</span>
-                                    <span class="order-info-value">${order.CNPJ}</span>
-                                </div>
-                                <div class="order-info-item">
-                                    <span class="order-info-label">Data Envio:</span>
-                                    <span class="order-info-value">${formatDateShort(order.DataEnvio)}</span>
-                                </div>
-                                <div class="order-info-item">
-                                    <span class="order-info-label">Itens:</span>
-                                    <span class="order-info-value">${order.Itens?.length || 0}</span>
-                                </div>
-                                <div class="order-info-item">
-                                    <span class="order-info-label">Valor Total:</span>
-                                    <span class="order-info-value">${formatCurrency(order.ValorTotal)}</span>
-                                </div>
-                                ${order.Prioridade ? `
-                                <div class="order-info-item">
-                                    <span class="order-info-label">Prioridade:</span>
-                                    <span class="order-info-value">${getPriorityBadge(order.Prioridade)}</span>
-                                </div>
-                                ` : ''}
-                                ${order.AreaDestino ? `
-                                <div class="order-info-item">
-                                    <span class="order-info-label">Área Destino:</span>
-                                    <span class="order-info-value">${order.AreaDestino}</span>
-                                </div>
-                                ` : ''}
-                            </div>
-                        </div>
-                        <div class="order-footer">
-                            <button class="btn btn-secondary btn-sm" onclick="openOrderDetails('${order.PedidoID}')">
-                                <i data-feather="eye"></i>
-                                Ver Detalhes
-                            </button>
-                            ${actions}
-                        </div>
-                    </div>
-                `;
-            }).join('');
-            
-            feather.replace();
         }
 
         function getOrderActions(order, section) {

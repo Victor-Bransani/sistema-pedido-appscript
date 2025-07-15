@@ -428,81 +428,61 @@ function saveNewPedido(pedidoData) {
   invalidatePedidosCache(); // Invalida cache após criar novo pedido
 }
 
+// ========== BATCH UPDATE OTIMIZADO ==========
 function updatePedidoStatus(pedidoId, novoStatus, observacoes = '', additionalData = {}) {
   const user = checkUserSession();
   if (!user) throw new Error("Sessão inválida");
 
   const pedidosSheet = getSheet(CONFIG.SHEET_NAMES.PEDIDOS);
-  const data = pedidosSheet.getDataRange().getValues();
-  const headers = data[0];
-  
+  const range = pedidosSheet.getDataRange();
+  const allData = range.getValues();
+  const headers = allData[0];
   const pedidoIdIndex = headers.indexOf('PedidoID');
-  const statusIndex = headers.indexOf('Status');
-  const updatedAtIndex = headers.indexOf('UpdatedAt');
-  
-  for (let i = 1; i < data.length; i++) {
-    if (data[i][pedidoIdIndex] === pedidoId) {
-      const range = pedidosSheet.getRange(i + 1, 1, 1, headers.length);
-      const rowData = range.getValues()[0];
-      
-      // Atualizar status
-      rowData[statusIndex] = novoStatus;
-      rowData[updatedAtIndex] = new Date();
-      
-      // Atualizar campos específicos baseado no status
-      if (novoStatus === CONFIG.STATUS.RECEBIDO) {
-        const recebidoPorIndex = headers.indexOf('RecebidoPorID');
-        const dataRecebimentoIndex = headers.indexOf('DataRecebimento');
-        const obsRecebimentoIndex = headers.indexOf('ObservacoesRecebimento');
-        
-        rowData[recebidoPorIndex] = user.userId;
-        rowData[dataRecebimentoIndex] = new Date();
-        rowData[obsRecebimentoIndex] = observacoes;
-      } else if (novoStatus === CONFIG.STATUS.RETIRADO) {
-        const retiradoPorIndex = headers.indexOf('RetiradoPorID');
-        const dataRetiradaIndex = headers.indexOf('DataRetirada');
-        const obsRetiradaIndex = headers.indexOf('ObservacoesRetirada');
-        
-        rowData[retiradoPorIndex] = user.userId;
-        rowData[dataRetiradaIndex] = new Date();
-        rowData[obsRetiradaIndex] = observacoes;
-      }
-      
-      // Aplicar dados adicionais
-      Object.keys(additionalData).forEach(key => {
-        const index = headers.indexOf(key);
-        if (index !== -1) {
-          rowData[index] = additionalData[key];
-        }
-      });
-      
-      range.setValues([rowData]);
-      
-      logAction(user.userId, 'UPDATE_STATUS', `Pedido ${pedidoId} atualizado para ${novoStatus}`);
-      invalidatePedidosCache(); // Invalida cache após atualizar status
-      return true;
+  let rowToUpdate = -1;
+  for (let i = 1; i < allData.length; i++) {
+    if (allData[i][pedidoIdIndex] === pedidoId) {
+      rowToUpdate = i;
+      break;
     }
   }
-  
+  if (rowToUpdate !== -1) {
+    allData[rowToUpdate][headers.indexOf('Status')] = novoStatus;
+    allData[rowToUpdate][headers.indexOf('UpdatedAt')] = new Date();
+    if (novoStatus === CONFIG.STATUS.RECEBIDO) {
+      allData[rowToUpdate][headers.indexOf('RecebidoPorID')] = user.userId;
+      allData[rowToUpdate][headers.indexOf('DataRecebimento')] = new Date();
+      allData[rowToUpdate][headers.indexOf('ObservacoesRecebimento')] = observacoes;
+    } else if (novoStatus === CONFIG.STATUS.RETIRADO) {
+      allData[rowToUpdate][headers.indexOf('RetiradoPorID')] = user.userId;
+      allData[rowToUpdate][headers.indexOf('DataRetirada')] = new Date();
+      allData[rowToUpdate][headers.indexOf('ObservacoesRetirada')] = observacoes;
+    }
+    Object.keys(additionalData).forEach(key => {
+      const index = headers.indexOf(key);
+      if (index !== -1) {
+        allData[rowToUpdate][index] = additionalData[key];
+      }
+    });
+    range.setValues(allData);
+    logAction(user.userId, 'UPDATE_STATUS', `Pedido ${pedidoId} atualizado para ${novoStatus}`);
+    // Atualizar cache
+    invalidatePedidosCache();
+    return true;
+  }
   return false;
 }
 
+// ========== BUSCA OTIMIZADA ==========
 function searchPedidos(termoBusca = '', filtros = {}) {
   try {
     Logger.log('[DEBUG] searchPedidos chamado por: ' + JSON.stringify(checkUserSession()));
     const termo = (termoBusca || '').trim().toLowerCase();
     const user = checkUserSession();
-    
-    if (!user) return [];
-    
+    if (!user) return '<div class="col-span-full text-center text-gray-500 py-8">Nenhum pedido encontrado</div>';
     let pedidos = getPedidosComItens();
-    
-    // Filtrar por role
     if (user.role === CONFIG.ROLES.COMPRADOR) {
       pedidos = pedidos.filter(p => p.EnviadoPorID === user.userId);
     }
-    
-    // Aplicar filtros de busca
     if (termo) {
       pedidos = pedidos.filter(pedido => {
         return (
@@ -515,21 +495,18 @@ function searchPedidos(termoBusca = '', filtros = {}) {
         );
       });
     }
-    
-    // Aplicar filtros adicionais
     if (filtros.status) {
       pedidos = pedidos.filter(p => p.Status === filtros.status);
     }
-    
     if (filtros.prioridade) {
       pedidos = pedidos.filter(p => p.Prioridade === filtros.prioridade);
     }
-    
-    Logger.log('[DEBUG] searchPedidos retornando: ' + JSON.stringify(pedidos));
-    return pedidos;
+    var htmlResult = renderizarGridDePedidosComoHtml(pedidos);
+    Logger.log('[DEBUG] searchPedidos retorno tipo: ' + typeof htmlResult);
+    return (typeof htmlResult === 'string') ? htmlResult : String(htmlResult);
   } catch (e) {
     Logger.log('[ERRO] searchPedidos: ' + e.message);
-    return [];
+    return '<div class="col-span-full text-center text-gray-500 py-8">Erro ao buscar pedidos</div>';
   }
 }
 
@@ -636,7 +613,7 @@ function getPedidosComItens(limit) {
       StatusItem: i.StatusItem
     }))
   }));
-  cache.put(cacheKey, JSON.stringify(pedidosSerializados), 60); // cache por 60s
+  cache.put(cacheKey, JSON.stringify(pedidosSerializados), 1200); // cache por 20min
   return pedidosSerializados;
 }
 
@@ -668,7 +645,7 @@ function getAllUsers() {
     headers.forEach((h, idx) => { if (h !== 'HashedPassword') userObj[h] = data[i][idx]; });
     users.push(userObj);
   }
-  cache.put(cacheKey, JSON.stringify(users), 60);
+  cache.put(cacheKey, JSON.stringify(users), 1200);
   return users;
 }
 function invalidateUsersCache() {
@@ -703,7 +680,7 @@ function getRecentLogs(limit = 10) {
     PedidoID: l.PedidoID,
     Timestamp: l.Timestamp
   }));
-  cache.put(cacheKey, JSON.stringify(logsSerializados), 60);
+  cache.put(cacheKey, JSON.stringify(logsSerializados), 1200);
   return logsSerializados;
 }
 function invalidateLogsCache() {
@@ -1156,20 +1133,25 @@ function updateUserRole(userId, newRole) {
   }
   
   const sheet = getSheet(CONFIG.SHEET_NAMES.USUARIOS);
-  const data = sheet.getDataRange().getValues();
-  const headers = data[0];
-  
+  const range = sheet.getDataRange();
+  const allData = range.getValues();
+  const headers = allData[0];
   const userIdIndex = headers.indexOf('UserID');
   const roleIndex = headers.indexOf('Role');
-  
-  for (let i = 1; i < data.length; i++) {
-    if (data[i][userIdIndex] === userId) {
-      sheet.getRange(i + 1, roleIndex + 1).setValue(newRole);
-      logAction(currentUser.userId, 'UPDATE_USER_ROLE', `Role do usuário ${userId} alterada para ${newRole}`);
-      return { success: true };
+  let updated = false;
+  for (let i = 1; i < allData.length; i++) {
+    if (allData[i][userIdIndex] === userId) {
+      allData[i][roleIndex] = newRole;
+      updated = true;
+      break;
     }
   }
-  
+  if (updated) {
+    range.setValues(allData);
+    logAction(currentUser.userId, 'UPDATE_USER_ROLE', `Role do usuário ${userId} alterada para ${newRole}`);
+    invalidateUsersCache();
+    return { success: true };
+  }
   return { success: false, message: "Usuário não encontrado" };
 }
 
@@ -1178,24 +1160,29 @@ function toggleUserStatus(userId) {
   if (!currentUser || currentUser.role !== CONFIG.ROLES.ADMIN) {
     throw new Error("Acesso negado");
   }
-  
   const sheet = getSheet(CONFIG.SHEET_NAMES.USUARIOS);
-  const data = sheet.getDataRange().getValues();
-  const headers = data[0];
-  
+  const range = sheet.getDataRange();
+  const allData = range.getValues();
+  const headers = allData[0];
   const userIdIndex = headers.indexOf('UserID');
   const statusIndex = headers.indexOf('Status');
-  
-  for (let i = 1; i < data.length; i++) {
-    if (data[i][userIdIndex] === userId) {
-      const currentStatus = data[i][statusIndex];
-      const newStatus = currentStatus === 'Ativo' ? 'Inativo' : 'Ativo';
-      sheet.getRange(i + 1, statusIndex + 1).setValue(newStatus);
-      logAction(currentUser.userId, 'TOGGLE_USER_STATUS', `Status do usuário ${userId} alterado para ${newStatus}`);
-      return { success: true, newStatus };
+  let updated = false;
+  let newStatus = '';
+  for (let i = 1; i < allData.length; i++) {
+    if (allData[i][userIdIndex] === userId) {
+      const currentStatus = allData[i][statusIndex];
+      newStatus = currentStatus === 'Ativo' ? 'Inativo' : 'Ativo';
+      allData[i][statusIndex] = newStatus;
+      updated = true;
+      break;
     }
   }
-  
+  if (updated) {
+    range.setValues(allData);
+    logAction(currentUser.userId, 'TOGGLE_USER_STATUS', `Status do usuário ${userId} alterado para ${newStatus}`);
+    invalidateUsersCache();
+    return { success: true, newStatus };
+  }
   return { success: false, message: "Usuário não encontrado" };
 }
 
@@ -1233,32 +1220,30 @@ function updateItemRecebimento(itemId, quantidadeRecebida, observacoes, divergen
   if (!user || user.role !== CONFIG.ROLES.RECEBEDOR) {
     throw new Error("Apenas recebedores podem atualizar itens");
   }
-  
   const sheet = getSheet(CONFIG.SHEET_NAMES.ITENS);
-  const data = sheet.getDataRange().getValues();
-  const headers = data[0];
-  
+  const range = sheet.getDataRange();
+  const allData = range.getValues();
+  const headers = allData[0];
   const itemIdIndex = headers.indexOf('ItemID');
   const qtdRecebidaIndex = headers.indexOf('QuantidadeRecebida');
   const obsIndex = headers.indexOf('Observacoes');
   const divergenciasIndex = headers.indexOf('Divergencias');
-  
-  for (let i = 1; i < data.length; i++) {
-    if (data[i][itemIdIndex] === itemId) {
-      const range = sheet.getRange(i + 1, 1, 1, headers.length);
-      const rowData = range.getValues()[0];
-      
-      rowData[qtdRecebidaIndex] = quantidadeRecebida;
-      rowData[obsIndex] = observacoes || '';
-      rowData[divergenciasIndex] = divergencias || '';
-      
-      range.setValues([rowData]);
-      
-      logAction(user.userId, 'UPDATE_ITEM', `Item ${itemId} atualizado no recebimento`);
-      return { success: true };
+  let updated = false;
+  for (let i = 1; i < allData.length; i++) {
+    if (allData[i][itemIdIndex] === itemId) {
+      allData[i][qtdRecebidaIndex] = quantidadeRecebida;
+      allData[i][obsIndex] = observacoes || '';
+      allData[i][divergenciasIndex] = divergencias || '';
+      updated = true;
+      break;
     }
   }
-  
+  if (updated) {
+    range.setValues(allData);
+    logAction(user.userId, 'UPDATE_ITEM', `Item ${itemId} atualizado no recebimento`);
+    invalidatePedidosCache();
+    return { success: true };
+  }
   return { success: false, message: "Item não encontrado" };
 }
 
@@ -1423,5 +1408,115 @@ function getRecentLogs(limit = 10) {
   // Ordena do mais recente para o mais antigo
   logs.sort((a, b) => new Date(b.Timestamp) - new Date(a.Timestamp));
   return logs.slice(0, limit);
+}
+  
+// ========== SERVER-SIDE RENDERING DE LISTAS ==========
+function renderizarGridDePedidosComoHtml(pedidos, user) {
+  if (!pedidos || pedidos.length === 0) {
+    return '<div class="col-span-full text-center text-gray-500 py-8">Nenhum pedido encontrado</div>';
+  }
+  // Funções auxiliares internas para gerar o HTML
+  const formatCurrency = (value) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value || 0);
+  const getStatusBadge = (status) => {
+    const colorMap = {
+      'Pendente': { bg: '#FEF3C7', text: '#F59E0B' },
+      'Em Trânsito': { bg: '#DBEAFE', text: '#3B82F6' },
+      'Recebido': { bg: '#D1FAE5', text: '#10B981' },
+      'Aguardando Retirada': { bg: '#EDE9FE', text: '#8B5CF6' },
+      'Retirado': { bg: '#F3F4F6', text: '#6B7280' },
+      'Finalizado': { bg: '#F3F4F6', text: '#6B7280' },
+      'Cancelado': { bg: '#FEE2E2', text: '#EF4444' }
+    };
+    const c = colorMap[status] || { bg: '#F3F4F6', text: '#6B7280' };
+    return `<span class="badge" style="background-color: ${c.bg}; color: ${c.text};">${status}</span>`;
+  };
+  const getPriorityBadge = (priority) => {
+    const colorMap = {
+      'Normal': { bg: '#DBEAFE', text: '#3B82F6' },
+      'Alta': { bg: '#FEF3C7', text: '#F59E0B' },
+      'Urgente': { bg: '#FEE2E2', text: '#EF4444' }
+    };
+    const c = colorMap[priority] || { bg: '#DBEAFE', text: '#3B82F6' };
+    return `<span class="badge" style="background-color: ${c.bg}; color: ${c.text};">${priority}</span>`;
+  };
+  const formatDateShort = (dateStr) => {
+    if (!dateStr) return 'N/A';
+    try {
+      const d = new Date(dateStr);
+      return Utilities.formatDate(d, Session.getScriptTimeZone(), 'dd/MM/yyyy');
+    } catch(e) { return 'N/A'; }
+  };
+  return pedidos.map(order => {
+    let actions = '';
+    const status = order.Status;
+    if (user.role === 'comprador') {
+      if (status === 'Recebido') {
+        actions += `<button class="btn btn-accent btn-sm" onclick="openStatusModal('${order.PedidoID}', 'definir_retirador')"><i data-feather="user-plus" class="btn-icon-sm"></i> Definir Retirador</button>`;
+      }
+      if (["Pendente", "Em Trânsito"].includes(status)) {
+        actions += `<button class="btn btn-warning btn-sm" onclick="openStatusModal('${order.PedidoID}', 'update_status')"><i data-feather="edit" class="btn-icon-sm"></i> Atualizar Status</button>`;
+      }
+    }
+    if (user.role === 'recebedor') {
+      if (["Pendente", "Em Trânsito"].includes(status)) {
+        actions += `<button class="btn btn-success btn-sm" onclick="openStatusModal('${order.PedidoID}', 'receber')"><i data-feather="check" class="btn-icon-sm"></i> Receber</button>`;
+      }
+    }
+    if (user.role === 'retirador') {
+      if (status === 'Aguardando Retirada' && order.RetiradoPorID === user.userId) {
+        actions += `<button class="btn btn-success btn-sm" onclick="openStatusModal('${order.PedidoID}', 'retirar')"><i data-feather="truck" class="btn-icon-sm"></i> Confirmar Retirada</button>`;
+      }
+    }
+    if (user.role === 'admin') {
+      actions += `<button class="btn btn-warning btn-sm" onclick="openStatusModal('${order.PedidoID}', 'update_status')"><i data-feather="edit" class="btn-icon-sm"></i> Atualizar</button>`;
+    }
+    return `
+      <div class="order-card">
+        <div class="order-header">
+          <h4 class="order-number">Pedido #${order.NumeroPedidoPDF || 'S/N'}</h4>
+          ${getStatusBadge(order.Status)}
+        </div>
+        <div class="order-body">
+          <div class="order-info">
+            <div class="order-info-item">
+              <span class="order-info-label">Fornecedor:</span>
+              <span class="order-info-value">${order.Fornecedor}</span>
+            </div>
+            <div class="order-info-item">
+              <span class="order-info-label">Valor Total:</span>
+              <span class="order-info-value">${formatCurrency(order.ValorTotal)}</span>
+            </div>
+            <div class="order-info-item">
+              <span class="order-info-label">Data Envio:</span>
+              <span class="order-info-value">${formatDateShort(order.DataEnvio)}</span>
+            </div>
+            ${order.Prioridade ? `<div class="order-info-item"><span class="order-info-label">Prioridade:</span><span class="order-info-value">${getPriorityBadge(order.Prioridade)}</span></div>` : ''}
+            ${order.AreaDestino ? `<div class="order-info-item"><span class="order-info-label">Área Destino:</span><span class="order-info-value">${order.AreaDestino}</span></div>` : ''}
+          </div>
+        </div>
+        <div class="order-footer">
+          <button class="btn btn-secondary btn-sm" onclick="openOrderDetails('${order.PedidoID}')">
+            <i data-feather="eye" class="btn-icon-sm"></i> Detalhes
+          </button>
+          ${actions}
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+// ========== FUNÇÃO ÚNICA DE INICIALIZAÇÃO ==========
+function getInitialAppData() {
+  const user = checkUserSession();
+  if (!user) return null;
+  const dashboardStats = getDashboardStats();
+  const notifications = getNotifications(user.userId);
+  const recentOrders = getPedidosComItens(5);
+  return {
+    dashboardStats: dashboardStats,
+    notifications: notifications,
+    recentOrders: recentOrders,
+    user: user
+  };
 }
   
