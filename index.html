@@ -2135,8 +2135,6 @@
 
         // ========== [CORREÇÃO: Inicialização DOM simplificada] ==========
         function initializeDOM() {
-            console.log('🔍 Verificando DOM...');
-            
             // Verificar elementos críticos
             const criticalElements = [
                 { name: 'loginModal', element: DOM.loginModal },
@@ -2154,22 +2152,17 @@
                 { name: 'adminSection', element: DOM.adminSection },
                 { name: 'reportsSection', element: DOM.reportsSection },
             ];
-            
             let missingCritical = false;
             criticalElements.forEach(item => {
                 if (!item.element) {
-                    console.error(`❌ Elemento crítico não encontrado: ${item.name}`);
                     missingCritical = true;
                 }
             });
-            
             if (missingCritical) {
                 alert('Erro: Elementos críticos do HTML não foram encontrados!');
                 return false;
             }
-            
             exposeGlobals();
-            console.log('✅ DOM verificado com sucesso');
             return true;
         }
 
@@ -2335,17 +2328,11 @@
         // AUTHENTICATION FUNCTIONS
         // =================================================================
         function initializeApp() {
-            console.log('🚀 Inicializando aplicação...');
-            
             // Verificar DOM
             if (!initializeDOM()) {
-                console.error('❌ Falha na verificação do DOM');
                 return;
             }
-            
             showLoader(true, 'Verificando sistema...');
-            
-            // Verificar se sistema está configurado
             if (typeof google !== 'undefined' && google.script) {
                 google.script.run
                     .withSuccessHandler(handleSystemCheck)
@@ -2392,106 +2379,68 @@
         }
 
         function showLoginModal() {
-            console.log('🔑 Mostrando modal de login...');
             if (DOM.loginModal) {
                 DOM.loginModal.classList.remove('hidden');
                 if (DOM.loginEmail) {
                     DOM.loginEmail.focus();
                 }
-                
-                // ✅ CONFIGURAR LISTENER DO BOTÃO DE LOGIN IMEDIATAMENTE
                 setupLoginButtonListener();
-            } else {
-                console.error('❌ Modal de login não encontrado');
             }
         }
 
         function handleLogin(event) {
-            console.log('🚀🚀🚀 HANDLELOGIN REAL INICIADO!');
-            console.log('📧 Evento recebido:', event);
-            
             if (event) {
                 event.preventDefault();
                 event.stopPropagation();
             }
-            
             const email = document.getElementById('login-email')?.value?.trim() || '';
             const password = document.getElementById('login-password')?.value?.trim() || '';
-            
-            console.log('📧 Email capturado:', email);
-            console.log('🔒 Password capturado:', password ? '***' : '(vazio)');
-            
             if (!email || !password) {
                 alert('Preencha email e senha!');
                 return;
             }
-            
             showLoader(true, 'Fazendo login...');
-            console.log('📡 Chamando google.script.run.loginUser...');
-            
-            // ✅ Verificar se google.script.run está disponível
             if (typeof google === 'undefined' || !google.script) {
-                console.error('❌ Google Apps Script não disponível');
                 showLoader(false);
                 alert('Erro: Google Apps Script não está disponível!');
                 return;
             }
-            
-            console.log('✅ Google Apps Script disponível, fazendo chamada...');
-            
             google.script.run
                 .withSuccessHandler(function(response) {
-                    console.log('📨 Resposta recebida:', response);
                     handleLoginResponse(response);
                 })
                 .withFailureHandler(function(error) {
-                    console.error('❌ Erro na chamada:', error);
                     handleError(error);
                 })
                 .loginUser(email, password);
-            
-            console.log('📡 Chamada enviada, aguardando resposta...');
         }
 
         function handleLoginResponse(response) {
-            console.log('📨 handleLoginResponse chamado:', response);
             showLoader(false);
-            
             if (!response) {
-                console.error('❌ Resposta nula do servidor');
                 alert('Resposta nula do servidor!');
                 return;
             }
-            
             if (response.success) {
-                console.log('✅ Login bem-sucedido!');
                 AppState.user = response.user;
                 if (DOM.loginModal) DOM.loginModal.classList.add('hidden');
                 if (DOM.appWrapper) DOM.appWrapper.classList.remove('hidden');
-                
-                console.log('🎯 Inicializando app principal...');
                 initializeMainApp();
                 showNotification('Login realizado com sucesso!', 'success');
             } else {
-                console.error('❌ Erro no login:', response.message);
                 showNotification(response.message || 'Erro no login', 'error');
             }
         }
 
         function handleError(error) {
-            console.error('❌ handleError chamado:', error);
             showLoader(false);
-            
             let errorMessage = 'Erro de conexão com o servidor.';
-            
             if (error && error.message) {
                 errorMessage = error.message;
             } else if (typeof error === 'string') {
                 errorMessage = error;
             }
-            
             showNotification(errorMessage, 'error', 10000);
-            console.error('❌ Erro detalhado:', error);
         }
 
         function handleLogout() {
@@ -2511,22 +2460,24 @@
         // MAIN APP INITIALIZATION
         // =================================================================
         function initializeMainApp() {
-            console.log('🎯 Inicializando aplicação principal...');
             if (DOM.loginModal) DOM.loginModal.classList.add('hidden');
             if (DOM.appWrapper) DOM.appWrapper.classList.remove('hidden');
-            // Loader só aparece se demorar >300ms
             let loaderTimeout = setTimeout(() => showLoader(true, 'Carregando dados...'), 300);
+            const user = AppState.user;
             google.script.run
-              .withSuccessHandler(initialData => {
+              .withSuccessHandler(dadosPainel => {
                 clearTimeout(loaderTimeout);
                 showLoader(false);
-                if (initialData) {
-                  AppState.user = initialData.user;
+                if (dadosPainel) {
+                  AppState.pedidos = dadosPainel.pedidos || [];
+                  AppState.users = dadosPainel.usuarios || [];
+                  AppState.notifications = dadosPainel.notificacoes || [];
+                  AppState.dashboardStats = dadosPainel.estatisticas || {};
                   setupUserInterface();
-                  renderDashboardStats(initialData.dashboardStats);
-                  renderRecentOrders(initialData.recentOrders);
-                  renderStatusChart(initialData.dashboardStats);
-                  handleNotifications(initialData.notifications);
+                  renderDashboardStats(dadosPainel.estatisticas);
+                  renderRecentOrders(dadosPainel.pedidos);
+                  renderStatusChart(dadosPainel.estatisticas);
+                  handleNotifications(dadosPainel.notificacoes);
                 }
                 setupNavigation();
                 setupEventListeners();
@@ -2535,26 +2486,217 @@
                 if (DOM.dashboardBtn) DOM.dashboardBtn.classList.add('active');
               })
               .withFailureHandler(handleError)
-              .getInitialAppData();
+              .getDadosPainel(user.role, user.email);
+        }
+
+        // Refatoração: Carregamento único ao trocar de painel
+        function carregarPainel(section, title) {
+            const user = AppState.user;
+            showLoader(true, 'Carregando dados...');
+            google.script.run
+                .withSuccessHandler(dadosPainel => {
+                    showLoader(false);
+                    AppState.pedidos = dadosPainel.pedidos || [];
+                    AppState.users = dadosPainel.usuarios || [];
+                    AppState.notifications = dadosPainel.notificacoes || [];
+                    AppState.dashboardStats = dadosPainel.estatisticas || {};
+                    if (section === 'dashboard-section') {
+                        renderDashboardStats(dadosPainel.estatisticas);
+                        renderRecentOrders(dadosPainel.pedidos);
+                        renderStatusChart(dadosPainel.estatisticas);
+                    } else if (section === 'buyer-section') {
+                        renderBuyerPanel(dadosPainel.pedidos);
+                    } else if (section === 'receiver-section') {
+                        renderReceiverPanel(dadosPainel.pedidos);
+                    } else if (section === 'retirador-section') {
+                        renderRetiradorPanel(dadosPainel.pedidos);
+                    } else if (section === 'admin-section') {
+                        renderAdminPanel(dadosPainel.users);
+                    }
+                    handleNotifications(dadosPainel.notificacoes);
+                    showSection(section, title);
+                })
+                .withFailureHandler(handleError)
+                .getDadosPainel(user.role, user.email);
+        }
+
+        // Refatoração: Atualizar navegação para usar carregarPainel
+        function setupNavigation() {
+            const navItems = [
+                { btn: DOM.dashboardBtn, section: 'dashboard-section', title: 'Dashboard' },
+                { btn: DOM.buyerBtn, section: 'buyer-section', title: 'Painel do Comprador' },
+                { btn: DOM.receiverBtn, section: 'receiver-section', title: 'Painel de Recebimento' },
+                { btn: DOM.retiradorBtn, section: 'retirador-section', title: 'Painel de Retirada' },
+                { btn: DOM.adminBtn, section: 'admin-section', title: 'Administração' },
+                { btn: DOM.reportStatusBtn, section: 'reports-section', title: 'Relatórios' },
+                { btn: DOM.reportSupplierBtn, section: 'reports-section', title: 'Relatórios' },
+                { btn: DOM.reportPerformanceBtn, section: 'reports-section', title: 'Relatórios' }
+            ];
+            navItems.forEach(item => {
+                if (item.btn) {
+                    item.btn.onclick = null;
+                    item.btn.addEventListener('click', () => {
+                        document.querySelectorAll('.nav-link').forEach(link => link.classList.remove('active'));
+                        item.btn.classList.add('active');
+                        carregarPainel(item.section, item.title);
+                    });
+                }
+            });
+        }
+
+        // Refatoração: Renderização dos painéis usando dados do painel
+        function renderBuyerPanel(pedidos) {
+            // Atualize DOM.buyerOrdersContainer, filtros, etc, usando pedidos
+            // Exemplo:
+            if (DOM.buyerOrdersContainer) {
+                DOM.buyerOrdersContainer.innerHTML = pedidos.map(order => `
+                    <div class="order-card">
+                        <div class="order-header">
+                            <h4 class="order-number">Pedido #${order.NumeroPedidoPDF || 'S/N'}</h4>
+                            ${getStatusBadge(order.Status)}
+                        </div>
+                        <div class="order-body">
+                            <div class="order-info">
+                                <div class="order-info-item">
+                                    <span class="order-info-label">Fornecedor:</span>
+                                    <span class="order-info-value">${order.Fornecedor}</span>
+                                </div>
+                                <div class="order-info-item">
+                                    <span class="order-info-label">Valor Total:</span>
+                                    <span class="order-info-value">${formatCurrency(order.ValorTotal)}</span>
+                                </div>
+                                <div class="order-info-item">
+                                    <span class="order-info-label">Data Envio:</span>
+                                    <span class="order-info-value">${formatDateShort(order.DataEnvio)}</span>
+                                </div>
+                                ${order.Prioridade ? `<div class="order-info-item"><span class="order-info-label">Prioridade:</span><span class="order-info-value">${getPriorityBadge(order.Prioridade)}</span></div>` : ''}
+                                ${order.AreaDestino ? `<div class="order-info-item"><span class="order-info-label">Área Destino:</span><span class="order-info-value">${order.AreaDestino}</span></div>` : ''}
+                            </div>
+                        </div>
+                        <div class="order-footer">
+                            <button class="btn btn-secondary btn-sm" onclick="openOrderDetails('${order.PedidoID}')">
+                                <i data-feather="eye" class="btn-icon-sm"></i> Detalhes
+                            </button>
+                        </div>
+                    </div>
+                `).join('');
+            }
+            feather.replace();
+        }
+        function renderReceiverPanel(pedidos) {
+            // Atualize DOM.receiverOrdersContainer, etc, usando pedidos
+            if (DOM.receiverOrdersContainer) {
+                DOM.receiverOrdersContainer.innerHTML = pedidos.map(order => `
+                    <div class="order-card">
+                        <div class="order-header">
+                            <h4 class="order-number">Pedido #${order.NumeroPedidoPDF || 'S/N'}</h4>
+                            ${getStatusBadge(order.Status)}
+                        </div>
+                        <div class="order-body">
+                            <div class="order-info">
+                                <div class="order-info-item">
+                                    <span class="order-info-label">Fornecedor:</span>
+                                    <span class="order-info-value">${order.Fornecedor}</span>
+                                </div>
+                                <div class="order-info-item">
+                                    <span class="order-info-label">Valor Total:</span>
+                                    <span class="order-info-value">${formatCurrency(order.ValorTotal)}</span>
+                                </div>
+                                <div class="order-info-item">
+                                    <span class="order-info-label">Data Envio:</span>
+                                    <span class="order-info-value">${formatDateShort(order.DataEnvio)}</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="order-footer">
+                            <button class="btn btn-secondary btn-sm" onclick="openOrderDetails('${order.PedidoID}')">
+                                <i data-feather="eye" class="btn-icon-sm"></i> Detalhes
+                            </button>
+                        </div>
+                    </div>
+                `).join('');
+            }
+            feather.replace();
+        }
+        function renderRetiradorPanel(pedidos) {
+            // Atualize DOM.retiradorOrdersContainer, etc, usando pedidos
+            if (DOM.retiradorOrdersContainer) {
+                DOM.retiradorOrdersContainer.innerHTML = pedidos.map(order => `
+                    <div class="order-card">
+                        <div class="order-header">
+                            <h4 class="order-number">Pedido #${order.NumeroPedidoPDF || 'S/N'}</h4>
+                            ${getStatusBadge(order.Status)}
+                        </div>
+                        <div class="order-body">
+                            <div class="order-info">
+                                <div class="order-info-item">
+                                    <span class="order-info-label">Fornecedor:</span>
+                                    <span class="order-info-value">${order.Fornecedor}</span>
+                                </div>
+                                <div class="order-info-item">
+                                    <span class="order-info-label">Valor Total:</span>
+                                    <span class="order-info-value">${formatCurrency(order.ValorTotal)}</span>
+                                </div>
+                                <div class="order-info-item">
+                                    <span class="order-info-label">Data Envio:</span>
+                                    <span class="order-info-value">${formatDateShort(order.DataEnvio)}</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="order-footer">
+                            <button class="btn btn-secondary btn-sm" onclick="openOrderDetails('${order.PedidoID}')">
+                                <i data-feather="eye" class="btn-icon-sm"></i> Detalhes
+                            </button>
+                        </div>
+                    </div>
+                `).join('');
+            }
+            feather.replace();
+        }
+        function renderAdminPanel(users) {
+            // Atualize DOM.usersTableBody, etc, usando users
+            if (DOM.usersTableBody) {
+                DOM.usersTableBody.innerHTML = users.map(user => `
+                    <tr>
+                        <td class="font-medium">${user.Nome}</td>
+                        <td>${user.Email}</td>
+                        <td>${getRoleDisplayName(user.Role)}</td>
+                        <td>
+                            <span class="badge ${user.Status === 'Ativo' ? 'badge-received' : 'badge-cancelled'}">
+                                ${user.Status}
+                            </span>
+                        </td>
+                        <td>${formatDate(user.LastLogin)}</td>
+                        <td>
+                            <div class="flex gap-2">
+                                <select class="form-select text-xs" onchange="updateUserRole('${user.UserID}', this.value)">
+                                    <option value="${user.Role}">${getRoleDisplayName(user.Role)}</option>
+                                    ${Object.values(ROLES).filter(r => r !== user.Role).map(role => 
+                                        `<option value="${role}">${getRoleDisplayName(role)}</option>`
+                                    ).join('')}
+                                </select>
+                                <button class="btn btn-sm ${user.Status === 'Ativo' ? 'btn-warning' : 'btn-success'}" 
+                                        onclick="toggleUserStatus('${user.UserID}')">
+                                    ${user.Status === 'Ativo' ? 'Desativar' : 'Ativar'}
+                                </button>
+                            </div>
+                        </td>
+                    </tr>
+                `).join('');
+            }
         }
 
         function setupUserInterface() {
             const user = AppState.user;
-            console.log('🎨 Configurando interface do usuário');
-            
             if (DOM.userAvatar && user.name) {
                 DOM.userAvatar.textContent = getUserInitials(user.name);
             }
-            
             if (DOM.userName && user.name) {
                 DOM.userName.textContent = user.name;
             }
-            
             if (DOM.userRole && user.role) {
                 DOM.userRole.textContent = getRoleDisplayName(user.role);
             }
-            
-            // Show/hide navigation based on role
             if (DOM.navBuyer) {
                 DOM.navBuyer.style.display = [ROLES.ADMIN, ROLES.COMPRADOR].includes(user.role) ? 'block' : 'none';
             }
@@ -2580,105 +2722,35 @@
         }
 
         // ========== [CORREÇÃO: Listeners reforçados para navegação e ações] ==========
-        function setupNavigation() {
-            const navItems = [
-                { btn: DOM.dashboardBtn, section: 'dashboard-section', title: 'Dashboard', load: loadDashboard },
-                { btn: DOM.buyerBtn, section: 'buyer-section', title: 'Painel do Comprador', load: loadBuyerSection },
-                { btn: DOM.receiverBtn, section: 'receiver-section', title: 'Painel de Recebimento', load: loadReceiverSection },
-                { btn: DOM.retiradorBtn, section: 'retirador-section', title: 'Painel de Retirada', load: loadRetiradorSection },
-                { btn: DOM.adminBtn, section: 'admin-section', title: 'Administração', load: loadAdminSection },
-                { btn: DOM.reportStatusBtn, section: 'reports-section', title: 'Relatórios', load: loadReportsSection },
-                { btn: DOM.reportSupplierBtn, section: 'reports-section', title: 'Relatórios', load: loadReportsSection },
-                { btn: DOM.reportPerformanceBtn, section: 'reports-section', title: 'Relatórios', load: loadReportsSection }
-            ];
-            navItems.forEach(item => {
-                if (item.btn) {
-                    item.btn.onclick = null;
-                    item.btn.addEventListener('click', () => {
-                        document.querySelectorAll('.nav-link').forEach(link => link.classList.remove('active'));
-                        item.btn.classList.add('active');
-                        showSection(item.section, item.title);
-                        if (item.load) item.load();
-                    });
-                } else {
-                    console.warn(`⚠️ Botão de navegação não encontrado: ${item.section}`);
-                }
-            });
-        }
-
-        function showSection(sectionId, title) {
-            document.querySelectorAll('.section').forEach(section => {
-                section.classList.add('hidden');
-            });
-            
-            const targetSection = document.getElementById(sectionId);
-            if (targetSection) {
-                targetSection.classList.remove('hidden');
-            }
-            
-            if (DOM.pageTitle) {
-                DOM.pageTitle.textContent = title;
-            } else {
-                console.warn('⚠️ Page title não encontrado');
-            }
-        }
-
-                function setupEventListeners() {
-            console.log('🎯 Configurando event listeners...');
-            
-            // Logout
+        function setupEventListeners() {
             if (DOM.logoutBtn) {
                 DOM.logoutBtn.addEventListener('click', handleLogout);
-            } else {
-                console.warn('⚠️ Botão de logout não encontrado');
             }
-            
-            // File upload
             setupFileUploadListeners();
-            
-            // Search and filters
             setupSearchAndFilterListeners();
-            
-            // Modals
             setupModalListeners();
-            
-            // Forms
             setupFormListeners();
-            
-            // Admin
             setupAdminListeners();
-            
-            // Notifications
             setupNotificationListeners();
-            
-            console.log('✅ Event listeners configurados');
         }
 
         // ========== [CORREÇÃO: Listeners reforçados para upload de arquivo] ==========
         function setupFileUploadListeners() {
             if (!DOM.pdfUpload || !DOM.uploadArea || !DOM.processPdfBtn || !DOM.removeFileBtn) {
-                console.warn('⚠️ Elementos de upload não encontrados');
                 return;
             }
-            
             DOM.pdfUpload.onchange = null;
             DOM.pdfUpload.addEventListener('change', handleFileSelection);
-            
             DOM.uploadArea.onclick = null;
             DOM.uploadArea.addEventListener('click', () => DOM.pdfUpload.click());
-            
             DOM.uploadArea.ondragover = null;
             DOM.uploadArea.addEventListener('dragover', handleDragOver);
-            
             DOM.uploadArea.ondragleave = null;
             DOM.uploadArea.addEventListener('dragleave', handleDragLeave);
-            
             DOM.uploadArea.ondrop = null;
             DOM.uploadArea.addEventListener('drop', handleFileDrop);
-            
             DOM.removeFileBtn.onclick = null;
             DOM.removeFileBtn.addEventListener('click', clearSelectedFile);
-            
             DOM.processPdfBtn.onclick = null;
             DOM.processPdfBtn.addEventListener('click', handlePdfProcessing);
         }
@@ -2832,56 +2904,34 @@
 
         // ========== [CORREÇÃO: Listener específico para botão de login] ==========
         function setupLoginButtonListener() {
-            console.log('🔧 Configurando listener do botão de login...');
-            
             const loginBtn = document.getElementById('login-submit-btn');
-            console.log('🔍 Procurando botão de login:', loginBtn);
-            
             if (loginBtn) {
-                console.log('🔧 Configurando botão de login...');
-                
-                // Limpar listeners anteriores
                 loginBtn.onclick = null;
                 loginBtn.removeEventListener('click', handleLogin);
-                
-                // Aplicar novo listener
                 loginBtn.addEventListener('click', function(event) {
-                    console.log('🚀🚀🚀 LOGIN CLICK DETECTADO!');
                     event.preventDefault();
                     event.stopPropagation();
                     handleLogin(event);
                 });
-                
-                // Também configurar onclick como backup
                 loginBtn.onclick = function(event) {
-                    console.log('🚀🚀🚀 LOGIN ONCLICK DETECTADO!');
                     event.preventDefault();
                     event.stopPropagation();
                     handleLogin(event);
                 };
-                
-                console.log('✅ Login button configurado com sucesso');
             } else {
-                console.error('❌ Login button não encontrado - ID: login-submit-btn');
-                // Tentar encontrar por classe
                 const loginBtnByClass = document.querySelector('.btn-primary, .login-btn, button[type="submit"]');
                 if (loginBtnByClass) {
-                    console.log('🔧 Encontrado botão por classe:', loginBtnByClass);
                     loginBtnByClass.addEventListener('click', function(event) {
-                        console.log('🚀🚀🚀 LOGIN CLICK DETECTADO (por classe)!');
                         event.preventDefault();
                         event.stopPropagation();
                         handleLogin(event);
                     });
                 }
             }
-            
-            // Enter no campo de senha
             if (DOM.loginPassword) {
                 DOM.loginPassword.onkeypress = null;
                 DOM.loginPassword.addEventListener('keypress', function(event) {
                     if (event.key === 'Enter') {
-                        console.log('🚀🚀🚀 ENTER PRESSIONADO!');
                         event.preventDefault();
                         handleLogin(event);
                     }
@@ -2995,143 +3045,23 @@
         }
 
         function loadDashboard() {
-            if (!DOM.dashboardStats || !DOM.recentOrdersTableBody) return;
-            
-            showLoader(true, 'Carregando dashboard...');
-            
-            Promise.all([
-                new Promise(resolve => {
-                    google.script.run
-                        .withSuccessHandler(resolve)
-                        .withFailureHandler(() => resolve({}))
-                        .getDashboardStats();
-                }),
-                new Promise(resolve => {
-                    google.script.run
-                        .withSuccessHandler(resolve)
-                        .withFailureHandler(() => resolve([]))
-                        .getPedidosComItens(10);
-                })
-            ]).then(([stats, recentOrders]) => {
-                renderDashboardStats(stats);
-                renderRecentOrders(recentOrders);
-                renderStatusChart(stats);
-                showLoader(false);
-            });
-        }
-
-        function renderDashboardStats(stats) {
-            if (!DOM.dashboardStats) return;
-            
-            const statsCards = [
-                { title: 'Total de Pedidos', value: stats.totalPedidos || 0, icon: 'package', color: '#3B82F6' },
-                { title: 'Pendentes', value: stats.pendentes || 0, icon: 'clock', color: '#F59E0B' },
-                { title: 'Em Trânsito', value: stats.emTransito || 0, icon: 'truck', color: '#3B82F6' },
-                { title: 'Recebidos', value: stats.recebidos || 0, icon: 'check-circle', color: '#10B981' },
-                { title: 'Aguardando Retirada', value: stats.aguardandoRetirada || 0, icon: 'box', color: '#8B5CF6' },
-                { title: 'Finalizados', value: stats.finalizados || 0, icon: 'check', color: '#6B7280' },
-                { title: 'Valor Total', value: formatCurrency(stats.valorTotal), icon: 'dollar-sign', color: '#10B981' }
-            ];
-            
-            if (AppState.user?.role === ROLES.COMPRADOR && stats.meusPedidos !== undefined) {
-                statsCards.splice(1, 0, 
-                    { title: 'Meus Pedidos', value: stats.meusPedidos, icon: 'user', color: '#8B5CF6' },
-                    { title: 'Meus Valores', value: formatCurrency(stats.meusValores), icon: 'credit-card', color: '#F59E0B' }
-                );
-            }
-            
-            DOM.dashboardStats.innerHTML = statsCards.map(stat => `
-                <div class="stat-card">
-                    <div class="stat-header">
-                        <span class="stat-title">${stat.title}</span>
-                        <i data-feather="${stat.icon}" class="stat-icon" style="color: ${stat.color};"></i>
-                    </div>
-                    <div class="stat-value">${stat.value}</div>
-                </div>
-            `).join('');
-            
-            feather.replace();
-        }
-
-        function renderRecentOrders(orders) {
-            if (!DOM.recentOrdersTableBody) return;
-            
-            if (!orders || orders.length === 0) {
-                DOM.recentOrdersTableBody.innerHTML = '<tr><td colspan="4" class="text-center">Nenhum pedido encontrado</td></tr>';
-                return;
-            }
-            
-            DOM.recentOrdersTableBody.innerHTML = orders.slice(0, 5).map(order => `
-                <tr>
-                    <td class="font-medium">#${order.NumeroPedidoPDF || 'S/N'}</td>
-                    <td>${order.Fornecedor}</td>
-                    <td>${getStatusBadge(order.Status)}</td>
-                    <td class="font-medium">${formatCurrency(order.ValorTotal)}</td>
-                </tr>
-            `).join('');
-        }
-
-        function renderStatusChart(stats) {
-            if (!DOM.statusChartCanvas) return;
-            
-            const ctx = DOM.statusChartCanvas.getContext('2d');
-            
-            if (AppState.charts.statusChart) {
-                AppState.charts.statusChart.destroy();
-            }
-            
-            AppState.charts.statusChart = new Chart(ctx, {
-                type: 'doughnut',
-                data: {
-                    labels: ['Pendente', 'Em Trânsito', 'Recebido', 'Aguardando Retirada', 'Finalizado'],
-                    datasets: [{
-                        data: [
-                            stats.pendentes || 0,
-                            stats.emTransito || 0,
-                            stats.recebidos || 0,
-                            stats.aguardandoRetirada || 0,
-                            stats.finalizados || 0
-                        ],
-                        backgroundColor: ['#F59E0B', '#3B82F6', '#10B981', '#8B5CF6', '#6B7280'],
-                        borderWidth: 2,
-                        borderColor: '#FFFFFF'
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: {
-                            position: 'bottom'
-                        }
-                    }
-                }
-            });
+            carregarPainel('dashboard-section', 'Dashboard');
         }
 
         function loadBuyerSection() {
-            searchPedidos('buyer');
+            carregarPainel('buyer-section', 'Painel do Comprador');
         }
 
         function loadReceiverSection() {
-            searchPedidos('receiver');
+            carregarPainel('receiver-section', 'Painel de Recebimento');
         }
 
         function loadRetiradorSection() {
-            searchPedidos('retirador');
+            carregarPainel('retirador-section', 'Painel de Retirada');
         }
 
         function loadAdminSection() {
-            if (typeof google !== 'undefined' && google.script) {
-                google.script.run
-                    .withSuccessHandler(renderLogs)
-                    .withFailureHandler(() => {
-                        if (DOM.logsTableBody) {
-                            DOM.logsTableBody.innerHTML = '<tr><td colspan="4" class="text-center">Logs não disponíveis</td></tr>';
-                        }
-                    })
-                    .getRecentLogs();
-            }
+            carregarPainel('admin-section', 'Administração');
         }
 
         function loadReportsSection() {
@@ -3938,25 +3868,16 @@
         // INITIALIZATION
         // =================================================================
         document.addEventListener('DOMContentLoaded', function() {
-            console.log('📱 DOM carregado, inicializando aplicação...');
-            
-            // Initialize feather icons
             if (typeof feather !== 'undefined') {
                 feather.replace();
             }
-            
-            // Configurar listener do botão de login imediatamente
             setupLoginButtonListener();
-            
-            // Start the application
             initializeApp();
-            
-            // Set up periodic data refresh
             setInterval(() => {
                 if (AppState.user) {
                     loadNotifications();
                 }
-            }, 60000); // Refresh every minute
+            }, 60000);
         });
 
         // =================================================================
@@ -3972,7 +3893,6 @@
         // ERROR HANDLING
         // =================================================================
         window.onerror = function(message, source, lineno, colno, error) {
-            console.error('[GLOBAL ERROR]', message, 'at', source + ':' + lineno + ':' + colno, error);
             showNotification('Erro inesperado: ' + message, 'error');
             return false;
         };

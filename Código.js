@@ -1539,3 +1539,269 @@ function getPedidosPaginados(pagina = 1, itensPorPagina = 20, termoBusca = '', f
   }
 }
   
+// =================================================================
+// OTIMIZAÇÃO DE PERFORMANCE - FUNÇÕES UNIFICADAS E OTIMIZADAS
+// =================================================================
+
+/**
+ * Função unificada para carregar todos os dados do painel de uma vez só
+ * @param {string} userRole
+ * @param {string} userEmail
+ * @return {Object}
+ */
+function getDadosPainel(userRole, userEmail) {
+  const dados = {
+    pedidos: [],
+    usuarios: [],
+    estatisticas: {},
+    notificacoes: []
+  };
+  try {
+    // Cache para dados que não mudam frequentemente
+    const cache = CacheService.getScriptCache();
+    // Busca pedidos baseado no role
+    switch(userRole) {
+      case 'comprador':
+        dados.pedidos = getPedidosComprador(userEmail);
+        break;
+      case 'recebedor':
+        dados.pedidos = getPedidosRecebimento();
+        break;
+      case 'retirador':
+        dados.pedidos = getPedidosRetirada(userEmail);
+        break;
+      case 'admin':
+        dados.pedidos = getTodosPedidos();
+        break;
+    }
+    // Dados em cache
+    let usuarios = cache.get('usuarios');
+    if (!usuarios) {
+      usuarios = JSON.stringify(getUsuarios());
+      cache.put('usuarios', usuarios, 1800); // 30 min
+    }
+    dados.usuarios = JSON.parse(usuarios);
+    dados.estatisticas = getEstatisticas();
+    dados.notificacoes = getNotificacoes(userEmail);
+    return dados;
+  } catch (error) {
+    Logger.log('Erro em getDadosPainel: ' + error.toString());
+    throw error;
+  }
+}
+
+/**
+ * Busca otimizada de todos os pedidos (processa tudo em memória)
+ */
+function getPedidosOtimizado() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Pedidos');
+  const dados = sheet.getDataRange().getValues();
+  if (dados.length <= 1) return [];
+  const headers = dados[0];
+  const pedidos = [];
+  for (let i = 1; i < dados.length; i++) {
+    const pedido = {};
+    headers.forEach((header, index) => {
+      pedido[header] = dados[i][index];
+    });
+    pedidos.push(pedido);
+  }
+  return pedidos;
+}
+
+function getPedidosComprador(emailComprador) {
+  const todosPedidos = getPedidosOtimizado();
+  return todosPedidos.filter(pedido => pedido.EnviadoPorID === emailComprador || pedido.emailComprador === emailComprador);
+}
+
+function getPedidosRecebimento() {
+  const todosPedidos = getPedidosOtimizado();
+  return todosPedidos.filter(pedido => pedido.Status === 'Pendente' || pedido.Status === 'Em Trânsito' || pedido.status === 'Pendente' || pedido.status === 'Em Trânsito');
+}
+
+function getPedidosRetirada(emailRetirador) {
+  const todosPedidos = getPedidosOtimizado();
+  return todosPedidos.filter(pedido => (pedido.Status === 'Aguardando Retirada' || pedido.status === 'Aguardando Retirada') && (pedido.RetiradoPorID === emailRetirador || pedido.retiradorEmail === emailRetirador));
+}
+
+function getTodosPedidos() {
+  return getPedidosOtimizado();
+}
+
+function getUsuarios() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Usuarios');
+  const dados = sheet.getDataRange().getValues();
+  if (dados.length <= 1) return [];
+  const headers = dados[0];
+  const usuarios = [];
+  for (let i = 1; i < dados.length; i++) {
+    const usuario = {};
+    headers.forEach((header, index) => {
+      usuario[header] = dados[i][index];
+    });
+    usuarios.push(usuario);
+  }
+  return usuarios;
+}
+
+function getEstatisticas() {
+  const pedidos = getPedidosOtimizado();
+  return {
+    total: pedidos.length,
+    pendentes: pedidos.filter(p => p.Status === 'Pendente' || p.status === 'Pendente').length,
+    emTransito: pedidos.filter(p => p.Status === 'Em Trânsito' || p.status === 'Em Trânsito').length,
+    recebidos: pedidos.filter(p => p.Status === 'Recebido' || p.status === 'Recebido').length,
+    aguardandoRetirada: pedidos.filter(p => p.Status === 'Aguardando Retirada' || p.status === 'Aguardando Retirada').length,
+    finalizados: pedidos.filter(p => p.Status === 'Finalizado' || p.status === 'Finalizado').length
+  };
+}
+
+function getUserRole(email) {
+  const usuarios = getUsuarios();
+  const user = usuarios.find(u => u.Email === email || u.email === email);
+  return user ? (user.Role || user.role) : null;
+}
+
+// =================================================================
+// FLUXOS DE PEDIDO (RECEBIMENTO, RETIRADOR, RETIRADA)
+// =================================================================
+
+function confirmarRecebimento(orderId, dadosRecebimento) {
+  const userEmail = Session.getActiveUser().getEmail();
+  const userRole = getUserRole(userEmail);
+  if (userRole !== 'recebedor' && userRole !== 'admin') {
+    throw new Error('Permissão negada. Apenas Recebedores podem confirmar recebimento.');
+  }
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Pedidos');
+  const dados = sheet.getDataRange().getValues();
+  const headers = dados[0];
+  for (let i = 1; i < dados.length; i++) {
+    if (dados[i][0] == orderId) {
+      const statusAtual = dados[i][headers.indexOf('Status')] || dados[i][headers.indexOf('status')];
+      if (statusAtual !== 'Pendente' && statusAtual !== 'Em Trânsito') {
+        throw new Error('Pedido não pode ser recebido no status atual: ' + statusAtual);
+      }
+      dados[i][headers.indexOf('Status')] = 'Recebido';
+      if (headers.indexOf('dataRecebimento') !== -1) dados[i][headers.indexOf('dataRecebimento')] = new Date();
+      if (headers.indexOf('RecebidoPorID') !== -1) dados[i][headers.indexOf('RecebidoPorID')] = userEmail;
+      if (headers.indexOf('observacoesRecebimento') !== -1) dados[i][headers.indexOf('observacoesRecebimento')] = dadosRecebimento.observacoes;
+      if (headers.indexOf('NF_URL') !== -1) dados[i][headers.indexOf('NF_URL')] = dadosRecebimento.linkNF;
+      if (headers.indexOf('Boleto_URL') !== -1) dados[i][headers.indexOf('Boleto_URL')] = dadosRecebimento.linkBoleto;
+      sheet.getDataRange().setValues(dados);
+      registrarLog('RECEBIMENTO', `Pedido ${orderId} recebido por ${userEmail}`);
+      return { success: true, message: 'Recebimento confirmado com sucesso!' };
+    }
+  }
+  throw new Error('Pedido não encontrado: ' + orderId);
+}
+
+function definirRetirador(orderId, retiradorEmail, areaDestino) {
+  const userEmail = Session.getActiveUser().getEmail();
+  const userRole = getUserRole(userEmail);
+  if (userRole !== 'comprador' && userRole !== 'admin') {
+    throw new Error('Permissão negada. Apenas Compradores podem definir retirador.');
+  }
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Pedidos');
+  const dados = sheet.getDataRange().getValues();
+  const headers = dados[0];
+  for (let i = 1; i < dados.length; i++) {
+    if (dados[i][0] == orderId) {
+      const statusAtual = dados[i][headers.indexOf('Status')] || dados[i][headers.indexOf('status')];
+      if (statusAtual !== 'Recebido') {
+        throw new Error('Pedido deve estar "Recebido" para definir retirador. Status atual: ' + statusAtual);
+      }
+      dados[i][headers.indexOf('Status')] = 'Aguardando Retirada';
+      if (headers.indexOf('RetiradoPorID') !== -1) dados[i][headers.indexOf('RetiradoPorID')] = retiradorEmail;
+      if (headers.indexOf('retiradorEmail') !== -1) dados[i][headers.indexOf('retiradorEmail')] = retiradorEmail;
+      if (headers.indexOf('AreaDestino') !== -1) dados[i][headers.indexOf('AreaDestino')] = areaDestino;
+      if (headers.indexOf('areaDestino') !== -1) dados[i][headers.indexOf('areaDestino')] = areaDestino;
+      if (headers.indexOf('dataDefinicaoRetirador') !== -1) dados[i][headers.indexOf('dataDefinicaoRetirador')] = new Date();
+      sheet.getDataRange().setValues(dados);
+      enviarNotificacao(retiradorEmail, 'NOVA_RETIRADA', `Você foi designado para retirar o pedido ${orderId}`);
+      registrarLog('DEFINIR_RETIRADOR', `Retirador ${retiradorEmail} definido para pedido ${orderId} por ${userEmail}`);
+      return { success: true, message: 'Retirador definido com sucesso!' };
+    }
+  }
+  throw new Error('Pedido não encontrado: ' + orderId);
+}
+
+function confirmarRetirada(orderId, observacoes) {
+  const userEmail = Session.getActiveUser().getEmail();
+  const userRole = getUserRole(userEmail);
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Pedidos');
+  const dados = sheet.getDataRange().getValues();
+  const headers = dados[0];
+  for (let i = 1; i < dados.length; i++) {
+    if (dados[i][0] == orderId) {
+      const statusAtual = dados[i][headers.indexOf('Status')] || dados[i][headers.indexOf('status')];
+      const retiradorAtribuido = dados[i][headers.indexOf('RetiradoPorID')] || dados[i][headers.indexOf('retiradorEmail')];
+      if (userRole !== 'admin' && retiradorAtribuido !== userEmail) {
+        throw new Error('Você não é o retirador designado para este pedido.');
+      }
+      if (statusAtual !== 'Aguardando Retirada') {
+        throw new Error('Pedido não está aguardando retirada. Status atual: ' + statusAtual);
+      }
+      dados[i][headers.indexOf('Status')] = 'Finalizado';
+      if (headers.indexOf('dataRetirada') !== -1) dados[i][headers.indexOf('dataRetirada')] = new Date();
+      if (headers.indexOf('observacoesRetirada') !== -1) dados[i][headers.indexOf('observacoesRetirada')] = observacoes;
+      sheet.getDataRange().setValues(dados);
+      const emailComprador = dados[i][headers.indexOf('EnviadoPorID')] || dados[i][headers.indexOf('emailComprador')];
+      enviarNotificacao(emailComprador, 'PEDIDO_FINALIZADO', `Seu pedido ${orderId} foi retirado e entregue`);
+      registrarLog('RETIRADA', `Pedido ${orderId} retirado por ${userEmail}`);
+      return { success: true, message: 'Retirada confirmada com sucesso!' };
+    }
+  }
+  throw new Error('Pedido não encontrado: ' + orderId);
+}
+
+// =================================================================
+// NOTIFICAÇÕES OTIMIZADAS
+// =================================================================
+
+function enviarNotificacao(emailDestino, tipo, mensagem) {
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Notificacoes');
+    sheet.appendRow([
+      new Date(),
+      emailDestino,
+      tipo,
+      mensagem,
+      false // não lida
+    ]);
+    // Envia email (opcional)
+    const assunto = `Sistema de Pedidos - ${tipo}`;
+    MailApp.sendEmail(emailDestino, assunto, mensagem);
+  } catch (error) {
+    Logger.log('Erro ao enviar notificação: ' + error.toString());
+  }
+}
+
+function getNotificacoes(userEmail) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Notificacoes');
+  const dados = sheet.getDataRange().getValues();
+  if (dados.length <= 1) return [];
+  const notificacoes = [];
+  for (let i = 1; i < dados.length; i++) {
+    if (dados[i][1] === userEmail && !dados[i][4]) { // não lidas
+      notificacoes.push({
+        data: dados[i][0],
+        tipo: dados[i][2],
+        mensagem: dados[i][3]
+      });
+    }
+  }
+  return notificacoes.slice(-10);
+}
+
+function registrarLog(tipo, mensagem) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Logs');
+  sheet.appendRow([
+    Utilities.getUuid(),
+    Session.getActiveUser().getEmail(),
+    tipo,
+    mensagem,
+    '',
+    new Date()
+  ]);
+}
+  
