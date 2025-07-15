@@ -1778,6 +1778,7 @@
                     <div id="buyer-orders-container" class="orders-grid">
                         <!-- Orders will be loaded here -->
                     </div>
+                    <div id="buyer-pagination" class="pagination-controls text-center mt-4"></div>
                 </section>
 
                 <!-- Receiver Section -->
@@ -1830,6 +1831,7 @@
                     <div id="receiver-orders-container" class="orders-grid">
                         <!-- Orders will be loaded here -->
                     </div>
+                    <div id="receiver-pagination" class="pagination-controls text-center mt-4"></div>
                 </section>
 
                 <!-- Retirador Section -->
@@ -1879,6 +1881,7 @@
                     <div id="retirador-orders-container" class="orders-grid">
                         <!-- Orders will be loaded here -->
                     </div>
+                    <div id="retirador-pagination" class="pagination-controls text-center mt-4"></div>
                 </section>
 
                 <!-- Admin Section -->
@@ -2692,7 +2695,11 @@
                 
                 if (search) {
                     search.oninput = null;
-                    search.addEventListener('input', debounce(() => searchPedidos(section), 500));
+                    let debounceTimeout;
+                    search.addEventListener('input', function() {
+                        clearTimeout(debounceTimeout);
+                        debounceTimeout = setTimeout(() => searchPedidos(section, 1), 500);
+                    });
                 } else {
                     console.warn(`⚠️ Campo de busca ${section} não encontrado`);
                 }
@@ -2706,14 +2713,14 @@
                 
                 if (statusFilter) {
                     statusFilter.onchange = null;
-                    statusFilter.addEventListener('change', () => searchPedidos(section));
+                    statusFilter.addEventListener('change', () => searchPedidos(section, 1));
                 } else {
                     console.warn(`⚠️ Filtro de status ${section} não encontrado`);
                 }
                 
                 if (priorityFilter) {
                     priorityFilter.onchange = null;
-                    priorityFilter.addEventListener('change', () => searchPedidos(section));
+                    priorityFilter.addEventListener('change', () => searchPedidos(section, 1));
                 } else {
                     console.warn(`⚠️ Filtro de prioridade ${section} não encontrado`);
                 }
@@ -3160,7 +3167,7 @@
         // =================================================================
         // SEARCH AND FILTER FUNCTIONS
         // =================================================================
-        function searchPedidos(section) {
+        function searchPedidos(section, pagina = 1) {
             const searchInputs = {
                 buyer: DOM.buyerSearch,
                 receiver: DOM.receiverSearch,
@@ -3181,30 +3188,64 @@
                 receiver: DOM.receiverOrdersContainer,
                 retirador: DOM.retiradorOrdersContainer
             };
+            const paginations = {
+                buyer: 'buyer-pagination',
+                receiver: 'receiver-pagination',
+                retirador: 'retirador-pagination'
+            };
             const searchTerm = searchInputs[section]?.value || '';
             const statusFilter = statusFilters[section]?.value || '';
             const priorityFilter = priorityFilters[section]?.value || '';
             const filters = {};
             if (statusFilter) filters.status = statusFilter;
             if (priorityFilter) filters.prioridade = priorityFilter;
-            // Loader só aparece se demorar >300ms
             let loaderTimeout = setTimeout(() => showLoader(true, 'Buscando pedidos...'), 300);
             google.script.run
-                .withSuccessHandler(html => {
+                .withSuccessHandler(result => {
                     clearTimeout(loaderTimeout);
                     showLoader(false);
                     const container = containers[section];
                     if (container) {
-                        container.innerHTML = html;
-                        feather.replace(); // Garante que os ícones feather são renderizados
+                        container.innerHTML = result.html;
+                        feather.replace();
                     }
+                    // Renderizar paginação
+                    renderPagination(section, result.paginaAtual, result.totalPaginas);
                 })
                 .withFailureHandler(error => {
                     clearTimeout(loaderTimeout);
                     showLoader(false);
                     handleError(error);
                 })
-                .searchPedidos(searchTerm, filters);
+                .getPedidosPaginados(pagina, 12, searchTerm, filters);
+        }
+
+        function renderPagination(section, paginaAtual, totalPaginas) {
+            let pagContainer = document.getElementById(`${section}-pagination`);
+            if (!pagContainer) {
+                pagContainer = document.createElement('div');
+                pagContainer.id = `${section}-pagination`;
+                pagContainer.className = 'pagination-controls text-center mt-4';
+                const ordersContainer = DOM[`${section}OrdersContainer`];
+                if (ordersContainer && ordersContainer.parentNode) {
+                    ordersContainer.parentNode.appendChild(pagContainer);
+                }
+            }
+            pagContainer.innerHTML = '';
+            if (totalPaginas <= 1) {
+                pagContainer.style.display = 'none';
+                return;
+            }
+            pagContainer.style.display = 'block';
+            let html = '';
+            if (paginaAtual > 1) {
+                html += `<button class="btn btn-secondary btn-sm" onclick="searchPedidos('${section}', ${paginaAtual - 1})">Anterior</button> `;
+            }
+            html += `<span class="mx-2">Página ${paginaAtual} de ${totalPaginas}</span>`;
+            if (paginaAtual < totalPaginas) {
+                html += ` <button class="btn btn-secondary btn-sm" onclick="searchPedidos('${section}', ${paginaAtual + 1})">Próxima</button>`;
+            }
+            pagContainer.innerHTML = html;
         }
 
         function getOrderActions(order, section) {

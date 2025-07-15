@@ -31,7 +31,6 @@ const CONFIG = {
 // =================================================================
 
 function doGet(e) {
-  Logger.log("doGet chamado");
   const template = HtmlService.createTemplateFromFile('index');
   const html = template.evaluate();
   html.setTitle('Sistema de Controle de Pedidos - Senac');
@@ -174,25 +173,16 @@ function createAdminUser() {
 // =================================================================
 
 function checkUserSession() {
-  Logger.log('[SESSION] checkUserSession chamado');
   const cache = CacheService.getUserCache();
   const token = cache.get('sessionToken');
-  Logger.log('[SESSION] Token encontrado: ' + token);
   if (token) {
     const userData = cache.get(token);
-    Logger.log('[SESSION] Dados do usuário no cache: ' + (userData ? userData : 'NULO'));
     if (userData) { 
       const user = JSON.parse(userData);
-      Logger.log('[SESSION] Usuário parseado: ' + JSON.stringify(user));
       // Atualizar último login
       updateUserLastLogin(user.userId);
-      Logger.log('[SESSION] Último login atualizado para: ' + user.userId);
       return user; 
-    } else {
-      Logger.log('[SESSION] Nenhum dado de usuário encontrado para o token.');
     }
-  } else {
-    Logger.log('[SESSION] Nenhum token de sessão encontrado no cache.');
   }
   return null;
 }
@@ -201,7 +191,6 @@ function checkUserSession() {
 
 function loginUser(email, password) {
   try {
-    Logger.log('[LOGIN] loginUser chamado com email: ' + email);
     
     // ✅ ADICIONE esta verificação no início
     if (!email || !password) {
@@ -212,8 +201,6 @@ function loginUser(email, password) {
     const cleanPassword = password.trim();
     const user = findUserByEmail(cleanEmail);
     
-    Logger.log('[LOGIN] Usuário encontrado: ' + (user ? 'SIM' : 'NÃO'));
-    
     if (!user) { 
       return { success: false, message: "Usuário não encontrado." }; 
     }
@@ -223,7 +210,6 @@ function loginUser(email, password) {
     }
     
     const hashedPassword = hashPassword(cleanPassword);
-    Logger.log('[LOGIN] Verificando senha...');
     
     if (user.HashedPassword.toString() !== hashedPassword) { 
       return { success: false, message: "Senha incorreta." }; 
@@ -242,7 +228,6 @@ function loginUser(email, password) {
     cache.put(token, JSON.stringify(userData), 21600);
     cache.put('sessionToken', token, 21600);
     
-    Logger.log('[LOGIN] Login bem-sucedido para: ' + email);
     return { success: true, user: userData };
     
   } catch (error) {
@@ -253,7 +238,6 @@ function loginUser(email, password) {
 
 // ✅ Função de teste simples
 function ping() {
-  Logger.log('[PING] ping chamado');
   return { ok: true, msg: 'pong', timestamp: new Date() };
 }
 
@@ -475,7 +459,6 @@ function updatePedidoStatus(pedidoId, novoStatus, observacoes = '', additionalDa
 // ========== BUSCA OTIMIZADA ==========
 function searchPedidos(termoBusca = '', filtros = {}) {
   try {
-    Logger.log('[DEBUG] searchPedidos chamado por: ' + JSON.stringify(checkUserSession()));
     const termo = (termoBusca || '').trim().toLowerCase();
     const user = checkUserSession();
     if (!user) return '<div class="col-span-full text-center text-gray-500 py-8">Nenhum pedido encontrado</div>';
@@ -501,8 +484,8 @@ function searchPedidos(termoBusca = '', filtros = {}) {
     if (filtros.prioridade) {
       pedidos = pedidos.filter(p => p.Prioridade === filtros.prioridade);
     }
-    var htmlResult = renderizarGridDePedidosComoHtml(pedidos);
-    Logger.log('[DEBUG] searchPedidos retorno tipo: ' + typeof htmlResult);
+    // Sempre renderize HTML!
+    var htmlResult = renderizarGridDePedidosComoHtml(pedidos, user);
     return (typeof htmlResult === 'string') ? htmlResult : String(htmlResult);
   } catch (e) {
     Logger.log('[ERRO] searchPedidos: ' + e.message);
@@ -820,7 +803,6 @@ function updatePedidoStatus(pedidoId, novoStatus, observacoes = '', additionalDa
 
 function searchPedidos(termoBusca = '', filtros = {}) {
   try {
-    Logger.log('[DEBUG] searchPedidos chamado por: ' + JSON.stringify(checkUserSession()));
     const termo = (termoBusca || '').trim().toLowerCase();
     const user = checkUserSession();
     
@@ -856,7 +838,6 @@ function searchPedidos(termoBusca = '', filtros = {}) {
       pedidos = pedidos.filter(p => p.Prioridade === filtros.prioridade);
     }
     
-    Logger.log('[DEBUG] searchPedidos retornando: ' + JSON.stringify(pedidos));
     return pedidos;
   } catch (e) {
     Logger.log('[ERRO] searchPedidos: ' + e.message);
@@ -1383,14 +1364,11 @@ function generatePerformanceReport(pedidos) {
 }
 
 function ping() {
-  Logger.log('[PING] ping chamado');
   return { ok: true, msg: 'pong' };
 }
 
 function testLoginUser() {
-  Logger.log('[TEST] testLoginUser chamado');
   var result = loginUser('email@dominio.com', 'senha');
-  Logger.log('[TEST] Resultado:', JSON.stringify(result));
   return result;
 }
 
@@ -1518,5 +1496,46 @@ function getInitialAppData() {
     recentOrders: recentOrders,
     user: user
   };
+}
+  
+// ========== PAGINAÇÃO DE PEDIDOS ==========
+function getPedidosPaginados(pagina = 1, itensPorPagina = 20, termoBusca = '', filtros = {}) {
+  try {
+    const user = checkUserSession();
+    if (!user) return { html: '<div class="col-span-full text-center text-gray-500 py-8">Nenhum pedido encontrado</div>', totalPaginas: 1, paginaAtual: 1 };
+    let pedidos = getPedidosComItens();
+    if (user.role === CONFIG.ROLES.COMPRADOR) {
+      pedidos = pedidos.filter(p => p.EnviadoPorID === user.userId);
+    }
+    if (termoBusca) {
+      const termo = termoBusca.trim().toLowerCase();
+      pedidos = pedidos.filter(pedido => {
+        return (
+          (pedido.NumeroPedidoPDF && pedido.NumeroPedidoPDF.toString().toLowerCase().includes(termo)) ||
+          (pedido.Fornecedor && pedido.Fornecedor.toLowerCase().includes(termo)) ||
+          (pedido.CNPJ && pedido.CNPJ.toLowerCase().includes(termo)) ||
+          (pedido.Itens && pedido.Itens.some(item => 
+            item.Descricao && item.Descricao.toLowerCase().includes(termo)
+          ))
+        );
+      });
+    }
+    if (filtros.status) {
+      pedidos = pedidos.filter(p => p.Status === filtros.status);
+    }
+    if (filtros.prioridade) {
+      pedidos = pedidos.filter(p => p.Prioridade === filtros.prioridade);
+    }
+    const total = pedidos.length;
+    const totalPaginas = Math.max(1, Math.ceil(total / itensPorPagina));
+    const inicio = (pagina - 1) * itensPorPagina;
+    const fim = Math.min(inicio + itensPorPagina, total);
+    const pedidosPagina = pedidos.slice(inicio, fim);
+    const html = renderizarGridDePedidosComoHtml(pedidosPagina, user);
+    return { html, totalPaginas, paginaAtual: pagina };
+  } catch (e) {
+    Logger.log('[ERRO] getPedidosPaginados: ' + e.message);
+    return { html: '<div class="col-span-full text-center text-gray-500 py-8">Erro ao buscar pedidos</div>', totalPaginas: 1, paginaAtual: 1 };
+  }
 }
   
