@@ -2342,6 +2342,7 @@ function showLoginModal() {
     console.log('🔑 Mostrando modal de login...');
     if (DOM.loginModal) {
         DOM.loginModal.classList.remove('hidden');
+        DOM.loginModal.classList.add('show');
         if (DOM.loginEmail) {
             DOM.loginEmail.focus();
         }
@@ -2643,12 +2644,14 @@ function setupAdminListeners() {
         DOM.manageUsersBtn.addEventListener('click', () => {
             loadUsers();
             DOM.usersModal?.classList.remove('hidden');
+            DOM.usersModal?.classList.add('show');
         });
     }
     
     if (DOM.openRegisterModalFromAdmin) {
         DOM.openRegisterModalFromAdmin.addEventListener('click', () => {
             DOM.registerModal?.classList.remove('hidden');
+            DOM.registerModal?.classList.add('show');
         });
     }
     
@@ -3076,7 +3079,7 @@ function displayOrderDetails(order) {
     
     AppState.currentPedidoDetails = order;
     
-    DOM.detailsModalTitle.textContent = `Pedido #${order.NumeroPedidoPDF || 'S/N'}`;
+    DOM.detailsModalTitle.textContent = `Pedido ${order.NumeroPedidoPDF || 'S/N'}`;
     
     const itemsTable = order.Itens && order.Itens.length > 0 ? `
         <div class="table-container mt-4">
@@ -3162,6 +3165,7 @@ function displayOrderDetails(order) {
     `;
     
     DOM.orderDetailsModal.classList.remove('hidden');
+    DOM.orderDetailsModal.classList.add('show');
     feather.replace();
 }
 
@@ -3373,9 +3377,11 @@ function handleStatusUpdate(event) {
 
 function collectReceiveData() {
     const order = AppState.currentPedidoDetails || AppState.pedidos.find(p => p.PedidoID === DOM.statusPedidoId?.value);
+    
     const data = {
         'NF_URL': document.getElementById('nf-url')?.value || '',
-        'Boleto_URL': document.getElementById('boleto-url')?.value || ''
+        'Boleto_URL': document.getElementById('boleto-url')?.value || '',
+        'itensAtualizados': [] // Array para guardar os dados dos itens
     };
     
     if (order && order.Itens) {
@@ -3383,15 +3389,18 @@ function collectReceiveData() {
             const qtdInput = document.querySelector(`[name="qtd_recebida_${item.ItemID}"]`);
             const divInput = document.querySelector(`[name="divergencias_${item.ItemID}"]`);
             
-            if (qtdInput && typeof google !== 'undefined' && google.script) {
-                google.script.run
-                    .withSuccessHandler(() => {})
-                    .withFailureHandler(handleError)
-                    .updateItemRecebimento(item.ItemID, qtdInput.value, '', divInput?.value || '');
+            if (qtdInput) {
+                // Adiciona os dados de cada item ao array
+                data.itensAtualizados.push({
+                    itemId: item.ItemID,
+                    quantidadeRecebida: qtdInput.value,
+                    divergencias: divInput?.value || ''
+                });
             }
         });
     }
     
+    // A função agora só retorna o objeto com todos os dados
     return data;
 }
 

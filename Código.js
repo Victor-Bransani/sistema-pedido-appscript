@@ -744,35 +744,64 @@ function updatePedidoStatus(pedidoId, novoStatus, observacoes = '', additionalDa
   const pedidoIdIndex = headers.indexOf('PedidoID');
   
   let rowToUpdate = -1;
+  let pedidoOriginal = null;
   for (let i = 1; i < allData.length; i++) {
     if (allData[i][pedidoIdIndex] === pedidoId) {
       rowToUpdate = i;
+      pedidoOriginal = allData[i];
       break;
     }
   }
   
   if (rowToUpdate !== -1) {
+    // Atualiza o status principal do pedido
     allData[rowToUpdate][headers.indexOf('Status')] = novoStatus;
     allData[rowToUpdate][headers.indexOf('UpdatedAt')] = new Date();
     
+    // Adiciona detalhes com base no novo status
     if (novoStatus === CONFIG.STATUS.RECEBIDO) {
       allData[rowToUpdate][headers.indexOf('RecebidoPorID')] = user.userId;
       allData[rowToUpdate][headers.indexOf('DataRecebimento')] = new Date();
       allData[rowToUpdate][headers.indexOf('ObservacoesRecebimento')] = observacoes;
     } else if (novoStatus === CONFIG.STATUS.RETIRADO || novoStatus === CONFIG.STATUS.FINALIZADO) {
-      allData[rowToUpdate][headers.indexOf('RetiradoPorID')] = user.userId;
+      allData[rowToUpdate][headers.indexOf('RetiradoPorID')] = user.userId; // Pode ser sobrescrito pelo additionalData
       allData[rowToUpdate][headers.indexOf('DataRetirada')] = new Date();
       allData[rowToUpdate][headers.indexOf('ObservacoesRetirada')] = observacoes;
     }
     
+    // Processa dados adicionais (NF_URL, Boleto_URL, etc.)
     Object.keys(additionalData).forEach(key => {
       const index = headers.indexOf(key);
-      if (index !== -1) {
+      if (index !== -1 && key !== 'itensAtualizados') { // Não tenta escrever o array de itens na planilha de pedidos
         allData[rowToUpdate][index] = additionalData[key];
       }
     });
     
     range.setValues(allData);
+
+    // *** NOVA LÓGICA PARA ATUALIZAR ITENS ***
+    // Se 'additionalData' contém a lista de itens, atualiza-os
+    if (additionalData.itensAtualizados && Array.isArray(additionalData.itensAtualizados)) {
+      const itensSheet = getSheet(CONFIG.SHEET_NAMES.ITENS);
+      const itensRange = itensSheet.getDataRange();
+      const todosOsItens = itensRange.getValues();
+      const itensHeaders = todosOsItens[0];
+      const itemIdIndex = itensHeaders.indexOf('ItemID');
+      const qtdRecebidaIndex = itensHeaders.indexOf('QuantidadeRecebida');
+      const divergenciasIndex = itensHeaders.indexOf('Divergencias');
+
+      additionalData.itensAtualizados.forEach(itemAtualizado => {
+        for (let i = 1; i < todosOsItens.length; i++) {
+          if (todosOsItens[i][itemIdIndex] === itemAtualizado.itemId) {
+            todosOsItens[i][qtdRecebidaIndex] = itemAtualizado.quantidadeRecebida;
+            todosOsItens[i][divergenciasIndex] = itemAtualizado.divergencias;
+            break; // Otimização: para de procurar uma vez que acha o item
+          }
+        }
+      });
+      itensRange.setValues(todosOsItens); // Salva todas as atualizações de itens de uma vez
+    }
+
     logAction(user.userId, 'UPDATE_STATUS', `Pedido ${pedidoId} atualizado para ${novoStatus}`);
     invalidatePedidosCache();
     return true;
@@ -965,25 +994,36 @@ function callGeminiAPI(fileInfo) {
   
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${apiKey}`;
   const prompt = `
-    Analise a imagem deste 'Relatório de Pedido de Compra'.
-    Extraia as seguintes informações em formato JSON. Responda APENAS com o objeto JSON, sem nenhum texto ou markdown.
+    Você é um especialista em extração de dados de documentos PDF. Sua tarefa é analisar o Pedido de Compra e converter as informações em um objeto JSON puro.
 
-    {
-      "numero_pedido": "...",
-      "fornecedor": "...",
-      "cnpj": "...",
-      "itens": [
+    **INSTRUÇÃO MAIS IMPORTANTE:** Sua resposta deve ser APENAS o objeto JSON. Não inclua texto, explicações ou markdown como \`\`\`json.
+
+    **REGRAS DE EXTRAÇÃO:**
+
+    1.  **Estrutura Principal:** Use a seguinte estrutura JSON. Se um campo não for encontrado, use \`null\`.
         {
-          "descricao": "...",
-          "quantidade": ...,
-          "valor_unitario": ...
+          "numero_pedido": "...",
+          "fornecedor": {
+            "nome": "...",
+            "cnpj": "..."
+          },
+          "itens": [
+            {
+              "descricao": "...",
+              "quantidade": 0,
+              "valor_unitario": 0.00
+            }
+          ]
         }
-      ]
-    }
 
-    - Ignore campos de observação, rodapés, textos auxiliares e qualquer informação que não seja estritamente um item da tabela.
-    - Para cada item, extraia apenas: descricao (nome do produto/serviço, sem observações ou comentários), quantidade (valor numérico), valor_unitario (valor numérico).
-    - Se um valor não for encontrado, retorne "N/A" para strings e 0 para números.
+    2.  **Extração dos Itens (CRÍTICO):**
+        * Um "item" é uma linha na tabela que OBRIGATORIAMENTE contém uma descrição de produto, uma quantidade e um preço unitário.
+        * **IGNORE COMPLETAMENTE** qualquer linha ou bloco de texto que não siga essa estrutura. Por exemplo, ignore textos como "CAM CENTRO MANUTENÇÃO REQ...", "SOLICITADO POR...", pois eles NÃO SÃO ITENS.
+        * **Limpeza da Descrição:** Remova o código numérico inicial (ex: "000000007903.") da descrição do produto.
+
+    3.  **Formatação de Números:**
+        * Converta todos os valores de "Quantidade" e "Preço Unitário" para o formato de número (Number), não string.
+        * Para preços, use o ponto (.) como separador decimal. Exemplo: "199,60" deve se tornar \`199.60\`.
   `;
 
   const requestBody = { 
@@ -1007,7 +1047,8 @@ function callGeminiAPI(fileInfo) {
   const responseBody = response.getContentText();
 
   if (responseCode !== 200) {
-    throw new Error("A API do Gemini retornou um erro.");
+    Logger.log("Erro da API Gemini: " + responseBody);
+    throw new Error("A API do Gemini retornou um erro. Código: " + responseCode);
   }
   
   try {
@@ -1020,26 +1061,32 @@ function callGeminiAPI(fileInfo) {
     const match = jsonText.match(/```json\n([\s\S]*?)\n```/);
     if (match) { jsonText = match[1]; }
     
-    let pedido = JSON.parse(jsonText);
+    let geminiResult = JSON.parse(jsonText);
 
-    // Filtrar apenas campos essenciais
-    if (pedido && Array.isArray(pedido.itens)) {
-      pedido.itens = pedido.itens.map(item => ({
+    // *** A MÁGICA ACONTECE AQUI ***
+    // Transformamos a resposta aninhada do Gemini na estrutura "plana" que o seu sistema precisa.
+    const pedidoFormatado = {
+      numero_pedido: geminiResult.numero_pedido || 'N/A',
+      fornecedor: geminiResult.fornecedor?.nome || 'N/A', // Acessa o nome dentro do objeto
+      cnpj: geminiResult.fornecedor?.cnpj || 'N/A',         // Acessa o cnpj dentro do objeto
+      itens: []
+    };
+
+    // O restante do código de limpeza dos itens permanece o mesmo.
+    if (geminiResult && Array.isArray(geminiResult.itens)) {
+      pedidoFormatado.itens = geminiResult.itens.map(item => ({
         descricao: limparDescricaoItem(item.descricao || ''),
         quantidade: Number(item.quantidade) || 0,
         valor_unitario: Number(item.valor_unitario) || 0
       })).filter(item => item.descricao && item.quantidade > 0 && item.valor_unitario >= 0);
-    } else {
-      pedido.itens = [];
     }
     
-    return {
-      numero_pedido: pedido.numero_pedido || 'N/A',
-      fornecedor: pedido.fornecedor || 'N/A',
-      cnpj: pedido.cnpj || 'N/A',
-      itens: pedido.itens
-    };
+    // Retornamos o objeto já formatado para a função saveNewPedido
+    return pedidoFormatado;
+
   } catch(e) {
+    Logger.log("Erro ao processar JSON: " + e.message);
+    Logger.log("Resposta recebida da API: " + responseBody);
     throw new Error("Não foi possível processar a resposta da API do Gemini.");
   }
 }
@@ -1337,41 +1384,7 @@ function generatePerformanceReport(pedidos) {
 }
 
 // ===== FUNÇÕES ESPECÍFICAS POR ROLE =====
-function updateItemRecebimento(itemId, quantidadeRecebida, observacoes, divergencias) {
-  const user = checkUserSession();
-  if (!user || user.role !== CONFIG.ROLES.RECEBEDOR) {
-    throw new Error("Apenas recebedores podem atualizar itens");
-  }
-  
-  const sheet = getSheet(CONFIG.SHEET_NAMES.ITENS);
-  const range = sheet.getDataRange();
-  const allData = range.getValues();
-  const headers = allData[0];
-  const itemIdIndex = headers.indexOf('ItemID');
-  const qtdRecebidaIndex = headers.indexOf('QuantidadeRecebida');
-  const obsIndex = headers.indexOf('Observacoes');
-  const divergenciasIndex = headers.indexOf('Divergencias');
-  
-  let updated = false;
-  for (let i = 1; i < allData.length; i++) {
-    if (allData[i][itemIdIndex] === itemId) {
-      allData[i][qtdRecebidaIndex] = quantidadeRecebida;
-      allData[i][obsIndex] = observacoes || '';
-      allData[i][divergenciasIndex] = divergencias || '';
-      updated = true;
-      break;
-    }
-  }
-  
-  if (updated) {
-    range.setValues(allData);
-    logAction(user.userId, 'UPDATE_ITEM', `Item ${itemId} atualizado no recebimento`);
-    invalidatePedidosCache();
-    return { success: true };
-  }
-  
-  return { success: false, message: "Item não encontrado" };
-}
+
 
 function definirResponsavelRetirada(pedidoId, responsavelId, areaDestino) {
   const user = checkUserSession();
