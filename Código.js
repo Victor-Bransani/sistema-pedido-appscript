@@ -1,3 +1,4 @@
+// ===== CONFIGURAÇÕES E CONSTANTES =====
 const CONFIG = {
   SHEET_NAMES: {
     USUARIOS: 'Usuarios',
@@ -23,13 +24,12 @@ const CONFIG = {
     RETIRADO: 'Retirado',
     FINALIZADO: 'Finalizado',
     CANCELADO: 'Cancelado'
-  }
+  },
+  CACHE_DURATION: 1800, // 30 minutos
+  DEBUG_MODE: false
 };
 
-// =================================================================
-// SEÇÃO PRINCIPAL E SETUP
-// =================================================================
-
+// ===== SEÇÃO PRINCIPAL E SETUP =====
 function doGet(e) {
   const template = HtmlService.createTemplateFromFile('index');
   const html = template.evaluate();
@@ -37,6 +37,10 @@ function doGet(e) {
   html.setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
   html.addMetaTag('viewport', 'width=device-width, initial-scale=1.0');
   return html;
+}
+
+function include(filename) {
+  return HtmlService.createHtmlOutputFromFile(filename).getContent();
 }
 
 function onOpen() {
@@ -168,10 +172,102 @@ function createAdminUser() {
   }
 }
 
-// =================================================================
-// SEÇÃO DE AUTENTICAÇÃO (AUTH)
-// =================================================================
+// ===== OTIMIZAÇÃO: FUNÇÃO ÚNICA PARA CARREGAR TODOS OS DADOS =====
+function getDadosCompletos() {
+  const user = checkUserSession();
+  if (!user) throw new Error("Sessão inválida");
+  
+  try {
+    const dados = {
+      user: user,
+      dashboardStats: {},
+      pedidos: [],
+      usuarios: [],
+      recentOrders: [],
+      notifications: [],
+      logs: []
+    };
+    
+    // Carregar estatísticas do dashboard
+    dados.dashboardStats = getDashboardStats();
+    
+    // Carregar pedidos baseado no role do usuário
+    dados.pedidos = getPedidosComItensFiltradosPorRole(user);
+    
+    // Carregar pedidos recentes para dashboard
+    dados.recentOrders = getPedidosComItens(10);
+    
+    // Carregar usuários se for admin
+    if (user.role === CONFIG.ROLES.ADMIN) {
+      dados.usuarios = getAllUsers();
+      dados.logs = getRecentLogs();
+    } else {
+      // Carregar apenas retiradores para dropdown
+      dados.usuarios = getAllUsersByRole(CONFIG.ROLES.RETIRADOR);
+    }
+    
+    // Carregar notificações
+    dados.notifications = getNotifications(user.userId);
+    
+    return dados;
+    
+  } catch (error) {
+    Logger.log('[ERRO] getDadosCompletos: ' + error.toString());
+    throw new Error('Erro ao carregar dados: ' + error.message);
+  }
+}
 
+function getPedidosComItensFiltradosPorRole(user) {
+  let pedidos = getPedidosComItens();
+  
+  switch(user.role) {
+    case CONFIG.ROLES.COMPRADOR:
+      return pedidos.filter(p => p.EnviadoPorID === user.userId);
+    
+    case CONFIG.ROLES.RECEBEDOR:
+      return pedidos.filter(p => 
+        p.Status === CONFIG.STATUS.PENDENTE || 
+        p.Status === CONFIG.STATUS.EM_TRANSITO ||
+        p.Status === CONFIG.STATUS.RECEBIDO
+      );
+    
+    case CONFIG.ROLES.RETIRADOR:
+      return pedidos.filter(p => 
+        (p.Status === CONFIG.STATUS.AGUARDANDO_RETIRADA && p.RetiradoPorID === user.userId) ||
+        (p.Status === CONFIG.STATUS.RETIRADO && p.RetiradoPorID === user.userId) ||
+        (p.Status === CONFIG.STATUS.FINALIZADO && p.RetiradoPorID === user.userId)
+      );
+    
+    case CONFIG.ROLES.ADMIN:
+      return pedidos;
+    
+    default:
+      return pedidos.filter(p => p.EnviadoPorID === user.userId);
+  }
+}
+
+// ===== FUNÇÃO OTIMIZADA PARA DADOS INICIAIS DA APP =====
+function getInitialAppData() {
+  const user = checkUserSession();
+  if (!user) return null;
+  
+  try {
+    const dados = getDadosCompletos();
+    
+    return {
+      user: dados.user,
+      dashboardStats: dados.dashboardStats,
+      recentOrders: dados.recentOrders.slice(0, 5), // Apenas 5 mais recentes para dashboard
+      notifications: dados.notifications
+    };
+    
+  } catch (error) {
+    Logger.log('[ERRO] getInitialAppData: ' + error.toString());
+    throw new Error('Erro ao carregar dados iniciais: ' + error.message);
+  }
+}
+
+// ===== SEÇÃO DE AUTENTICAÇÃO (MANTIDA IGUAL) =====
 function checkUserSession() {
   const cache = CacheService.getUserCache();
   const token = cache.get('sessionToken');
@@ -179,7 +275,6 @@ function checkUserSession() {
     const userData = cache.get(token);
     if (userData) { 
       const user = JSON.parse(userData);
-      // Atualizar último login
       updateUserLastLogin(user.userId);
       return user; 
     }
@@ -187,12 +282,8 @@ function checkUserSession() {
   return null;
 }
 
-// ✅ No código do Apps Script, certifique-se que tem estas funções:
-
 function loginUser(email, password) {
   try {
-    
-    // ✅ ADICIONE esta verificação no início
     if (!email || !password) {
       return { success: false, message: "Email e senha são obrigatórios." };
     }
@@ -236,11 +327,6 @@ function loginUser(email, password) {
   }
 }
 
-// ✅ Função de teste simples
-function ping() {
-  return { ok: true, msg: 'pong', timestamp: new Date() };
-}
-
 function logoutUser() {
   const user = checkUserSession();
   if (user) {
@@ -260,12 +346,12 @@ function registerUser(name, email, password, role = CONFIG.ROLES.COMPRADOR) {
       name: name.trim(),
       email: email.trim(),
       hashedPassword: hashPassword(password.trim()),
-      role: 'pendente', // ou null
-      status: 'Aguardando Aprovação'
+      role: role,
+      status: 'Ativo' // Admin pode criar usuários ativos diretamente
     };
     
     saveNewUser(userData, null);
-    logAction(null, 'CREATE_USER', `Usuário criado: ${email} (pendente)`);
+    logAction(null, 'CREATE_USER', `Usuário criado: ${email} (${role})`);
     
     return { success: true };
   } catch (error) {
@@ -293,10 +379,7 @@ function updateUserLastLogin(userId) {
   }
 }
 
-// =================================================================
-// SEÇÃO DE BANCO DE DADOS (DATABASE)
-// =================================================================
-
+// ===== SEÇÃO DE BANCO DE DADOS (OTIMIZADA) =====
 function getSheet(sheetName) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let sheet = ss.getSheetByName(sheetName);
@@ -305,7 +388,6 @@ function getSheet(sheetName) {
 }
 
 function findUserByEmail(emailToFind) {
-  Logger.log('[DB] findUserByEmail chamado: ' + emailToFind);
   const sheet = getSheet(CONFIG.SHEET_NAMES.USUARIOS);
   if (sheet.getLastRow() < 2) return null;
   
@@ -318,13 +400,11 @@ function findUserByEmail(emailToFind) {
   for (const row of data) {
     const emailDaPlanilha = row[emailIndex] ? row[emailIndex].toString().trim() : "";
     if (emailDaPlanilha.toLowerCase() === emailToFind.toLowerCase()) {
-      Logger.log('[DB] Usuário encontrado: ' + emailDaPlanilha);
       const userObject = {};
       headers.forEach((header, index) => { userObject[header] = row[index]; });
       return userObject;
     }
   }
-  Logger.log('[DB] Usuário NÃO encontrado: ' + emailToFind);
   return null;
 }
 
@@ -341,195 +421,65 @@ function saveNewUser(userData, createdBy) {
     null, // LastLogin
     createdBy
   ]);
-}
-
-function saveNewPedido(pedidoData) {
-  const pedidosSheet = getSheet(CONFIG.SHEET_NAMES.PEDIDOS);
-  const itensSheet = getSheet(CONFIG.SHEET_NAMES.ITENS);
-  const user = checkUserSession();
-  const pedidoId = Utilities.getUuid();
-
-  // Calcular valor total
-  let valorTotal = 0;
-  if (pedidoData.itens && pedidoData.itens.length > 0) {
-    valorTotal = pedidoData.itens.reduce((total, item) => {
-      return total + (parseFloat(item.quantidade) * parseFloat(item.valor_unitario));
-    }, 0);
-  }
-
-  const pedidoRow = [
-    pedidoId,
-    pedidoData.numero_pedido || 'N/A',
-    pedidoData.fornecedor,
-    pedidoData.cnpj,
-    new Date(), // DataEnvio
-    pedidoData.data_prevista || null, // DataPrevista
-    CONFIG.STATUS.PENDENTE,
-    user.userId,
-    pedidoData.observacoes || '',
-    '', '', // NF_URL, Boleto_URL
-    null, null, '', // RecebidoPorID, DataRecebimento, ObservacoesRecebimento
-    null, null, '', // RetiradoPorID, DataRetirada, ObservacoesRetirada
-    pedidoData.area_destino || '',
-    pedidoData.prioridade || 'Normal',
-    valorTotal,
-    new Date() // UpdatedAt
-  ];
   
-  pedidosSheet.appendRow(pedidoRow);
-
-  if (pedidoData.itens && pedidoData.itens.length > 0) {
-    pedidoData.itens.forEach(item => {
-      // Ajustar nomes dos campos para o frontend
-      const descricaoLimpa = limparDescricaoItem(item.descricao || item.Descricao || '');
-      const quantidade = Number(item.quantidade || item.Quantidade || 0);
-      const valorUnitario = Number(item.valor_unitario || item.ValorUnitario || 0);
-      const itemRow = [
-        Utilities.getUuid(),
-        pedidoId,
-        descricaoLimpa, // Descricao
-        quantidade,     // Quantidade
-        0,              // QuantidadeRecebida
-        valorUnitario,  // ValorUnitario
-        CONFIG.STATUS.PENDENTE,
-        '', // Observacoes
-        '' // Divergencias
-      ];
-      itensSheet.appendRow(itemRow);
-    });
-  }
-
-  // Criar notificação para recebedores
-  createNotification(
-    null, // Para todos os recebedores
-    'Novo Pedido',
-    `Novo pedido #${pedidoData.numero_pedido} de ${pedidoData.fornecedor}`,
-    'info',
-    pedidoId
-  );
-
-  logAction(user.userId, 'CREATE_PEDIDO', `Pedido criado: #${pedidoData.numero_pedido}`);
-  invalidatePedidosCache(); // Invalida cache após criar novo pedido
+  // Invalidar cache de usuários
+  invalidateUsersCache();
 }
 
-// ========== BATCH UPDATE OTIMIZADO ==========
-function updatePedidoStatus(pedidoId, novoStatus, observacoes = '', additionalData = {}) {
-  const user = checkUserSession();
-  if (!user) throw new Error("Sessão inválida");
-
-  const pedidosSheet = getSheet(CONFIG.SHEET_NAMES.PEDIDOS);
-  const range = pedidosSheet.getDataRange();
-  const allData = range.getValues();
-  const headers = allData[0];
-  const pedidoIdIndex = headers.indexOf('PedidoID');
-  let rowToUpdate = -1;
-  for (let i = 1; i < allData.length; i++) {
-    if (allData[i][pedidoIdIndex] === pedidoId) {
-      rowToUpdate = i;
-      break;
-    }
-  }
-  if (rowToUpdate !== -1) {
-    allData[rowToUpdate][headers.indexOf('Status')] = novoStatus;
-    allData[rowToUpdate][headers.indexOf('UpdatedAt')] = new Date();
-    if (novoStatus === CONFIG.STATUS.RECEBIDO) {
-      allData[rowToUpdate][headers.indexOf('RecebidoPorID')] = user.userId;
-      allData[rowToUpdate][headers.indexOf('DataRecebimento')] = new Date();
-      allData[rowToUpdate][headers.indexOf('ObservacoesRecebimento')] = observacoes;
-    } else if (novoStatus === CONFIG.STATUS.RETIRADO) {
-      allData[rowToUpdate][headers.indexOf('RetiradoPorID')] = user.userId;
-      allData[rowToUpdate][headers.indexOf('DataRetirada')] = new Date();
-      allData[rowToUpdate][headers.indexOf('ObservacoesRetirada')] = observacoes;
-    }
-    Object.keys(additionalData).forEach(key => {
-      const index = headers.indexOf(key);
-      if (index !== -1) {
-        allData[rowToUpdate][index] = additionalData[key];
-      }
-    });
-    range.setValues(allData);
-    logAction(user.userId, 'UPDATE_STATUS', `Pedido ${pedidoId} atualizado para ${novoStatus}`);
-    // Atualizar cache
-    invalidatePedidosCache();
-    return true;
-  }
-  return false;
-}
-
-// ========== BUSCA OTIMIZADA ==========
-function searchPedidos(termoBusca = '', filtros = {}) {
-  try {
-    const termo = (termoBusca || '').trim().toLowerCase();
-    const user = checkUserSession();
-    if (!user) return '<div class="col-span-full text-center text-gray-500 py-8">Nenhum pedido encontrado</div>';
-    let pedidos = getPedidosComItens();
-    if (user.role === CONFIG.ROLES.COMPRADOR) {
-      pedidos = pedidos.filter(p => p.EnviadoPorID === user.userId);
-    }
-    if (termo) {
-      pedidos = pedidos.filter(pedido => {
-        return (
-          (pedido.NumeroPedidoPDF && pedido.NumeroPedidoPDF.toString().toLowerCase().includes(termo)) ||
-          (pedido.Fornecedor && pedido.Fornecedor.toLowerCase().includes(termo)) ||
-          (pedido.CNPJ && pedido.CNPJ.toLowerCase().includes(termo)) ||
-          (pedido.Itens && pedido.Itens.some(item => 
-            item.Descricao && item.Descricao.toLowerCase().includes(termo)
-          ))
-        );
-      });
-    }
-    if (filtros.status) {
-      pedidos = pedidos.filter(p => p.Status === filtros.status);
-    }
-    if (filtros.prioridade) {
-      pedidos = pedidos.filter(p => p.Prioridade === filtros.prioridade);
-    }
-    // Sempre renderize HTML!
-    var htmlResult = renderizarGridDePedidosComoHtml(pedidos, user);
-    return (typeof htmlResult === 'string') ? htmlResult : String(htmlResult);
-  } catch (e) {
-    Logger.log('[ERRO] searchPedidos: ' + e.message);
-    return '<div class="col-span-full text-center text-gray-500 py-8">Erro ao buscar pedidos</div>';
-  }
-}
-
-// ========== CACHE KEYS ==========
+// ===== CACHE KEYS OTIMIZADAS =====
 function getPedidosCacheKey(limit) {
   return 'pedidosComItens_' + (limit || 'all');
 }
+
 function getUsersCacheKey() {
   return 'allUsers';
 }
+
 function getLogsCacheKey(limit) {
   return 'recentLogs_' + (limit || 10);
 }
 
-// ========== PEDIDOS COM CACHE ==========
+// ===== PEDIDOS COM CACHE OTIMIZADO =====
 function getPedidosComItens(limit) {
-  var cache = CacheService.getScriptCache();
-  var cacheKey = getPedidosCacheKey(limit);
-  var cached = cache.get(cacheKey);
+  const cache = CacheService.getScriptCache();
+  const cacheKey = getPedidosCacheKey(limit);
+  let cached = cache.get(cacheKey);
+  
   if (cached) {
-    try { return JSON.parse(cached); } catch(e) { /* fallback */ }
+    try { 
+      return JSON.parse(cached); 
+    } catch(e) { 
+      // Cache corrompido, recriar
+      cache.remove(cacheKey);
+    }
   }
+  
   const pedidosSheet = getSheet(CONFIG.SHEET_NAMES.PEDIDOS);
   const itensSheet = getSheet(CONFIG.SHEET_NAMES.ITENS);
   const usuariosSheet = getSheet(CONFIG.SHEET_NAMES.USUARIOS);
+  
   if (pedidosSheet.getLastRow() < 2) return [];
+  
+  // Carregar e mapear usuários
   const usuariosData = usuariosSheet.getDataRange().getValues();
   const usuariosHeaders = usuariosData[0];
   const usuarios = {};
+  
   for (let i = 1; i < usuariosData.length; i++) {
     const userObj = {};
     usuariosHeaders.forEach((h, idx) => userObj[h] = usuariosData[i][idx]);
     usuarios[userObj.UserID] = userObj;
   }
+  
+  // Carregar e mapear itens por pedido
   const todosOsItens = itensSheet.getDataRange().getValues();
   const itensHeaders = todosOsItens[0];
   const itensPorPedido = {};
+  
   for (let i = 1; i < todosOsItens.length; i++) {
     const itemObj = {};
     itensHeaders.forEach((h, idx) => itemObj[h] = todosOsItens[i][idx]);
+    
     const itemPadronizado = {
       ItemID: itemObj.ItemID,
       PedidoID: itemObj.PedidoID,
@@ -541,16 +491,21 @@ function getPedidosComItens(limit) {
       Observacoes: itemObj.Observacoes || '',
       Divergencias: itemObj.Divergencias || ''
     };
+    
     const pedidoId = itemObj.PedidoID;
     if (!itensPorPedido[pedidoId]) itensPorPedido[pedidoId] = [];
     itensPorPedido[pedidoId].push(itemPadronizado);
   }
+  
+  // Carregar e mapear pedidos
   const todosOsPedidos = pedidosSheet.getDataRange().getValues();
   const pedidosHeaders = todosOsPedidos[0];
   let pedidos = [];
+  
   for (let i = 1; i < todosOsPedidos.length; i++) {
     const pedidoObj = {};
     pedidosHeaders.forEach((h, idx) => pedidoObj[h] = todosOsPedidos[i][idx]);
+    
     const pedidoPadronizado = {
       PedidoID: pedidoObj.PedidoID,
       NumeroPedidoPDF: String(pedidoObj.NumeroPedidoPDF || ''),
@@ -567,367 +522,88 @@ function getPedidosComItens(limit) {
       EnviadoPorNome: usuarios[pedidoObj.EnviadoPorID]?.Nome || '',
       RecebidoPorNome: usuarios[pedidoObj.RecebidoPorID]?.Nome || '',
       RetiradoPorNome: usuarios[pedidoObj.RetiradoPorID]?.Nome || '',
+      RetiradoPorID: pedidoObj.RetiradoPorID || '',
+      NF_URL: pedidoObj.NF_URL || '',
+      Boleto_URL: pedidoObj.Boleto_URL || '',
+      DataRecebimento: pedidoObj.DataRecebimento ? String(pedidoObj.DataRecebimento) : '',
+      DataRetirada: pedidoObj.DataRetirada ? String(pedidoObj.DataRetirada) : '',
+      ObservacoesRecebimento: pedidoObj.ObservacoesRecebimento || '',
+      ObservacoesRetirada: pedidoObj.ObservacoesRetirada || '',
       Itens: itensPorPedido[pedidoObj.PedidoID] || []
     };
+    
     pedidos.push(pedidoPadronizado);
   }
+  
+  // Ordenar por data de envio (mais recentes primeiro)
   pedidos.sort((a, b) => new Date(b.DataEnvio) - new Date(a.DataEnvio));
-  const pedidosSerializados = (limit ? pedidos.slice(0, limit) : pedidos).map(p => ({
-    PedidoID: p.PedidoID,
-    NumeroPedidoPDF: p.NumeroPedidoPDF,
-    Fornecedor: p.Fornecedor,
-    CNPJ: p.CNPJ,
-    Status: p.Status,
-    DataEnvio: p.DataEnvio,
-    DataPrevista: p.DataPrevista,
-    EnviadoPorID: p.EnviadoPorID,
-    Observacoes: p.Observacoes,
-    AreaDestino: p.AreaDestino,
-    Prioridade: p.Prioridade,
-    ValorTotal: p.ValorTotal,
-    EnviadoPorNome: p.EnviadoPorNome,
-    RecebidoPorNome: p.RecebidoPorNome,
-    RetiradoPorNome: p.RetiradoPorNome,
-    Itens: (p.Itens || []).map(i => ({
-      ItemID: i.ItemID,
-      Descricao: i.Descricao,
-      Quantidade: i.Quantidade,
-      ValorUnitario: i.ValorUnitario,
-      StatusItem: i.StatusItem
-    }))
-  }));
-  cache.put(cacheKey, JSON.stringify(pedidosSerializados), 1200); // cache por 20min
-  return pedidosSerializados;
+  
+  // Aplicar limite se especificado
+  const result = limit ? pedidos.slice(0, limit) : pedidos;
+  
+  // Cachear resultado
+  cache.put(cacheKey, JSON.stringify(result), CONFIG.CACHE_DURATION);
+  
+  return result;
 }
 
-// ========== INVALIDAÇÃO DE CACHE ==========
+// ===== INVALIDAÇÃO DE CACHE =====
 function invalidatePedidosCache() {
-  var cache = CacheService.getScriptCache();
+  const cache = CacheService.getScriptCache();
+  // Remover todos os caches de pedidos
+  for (let i = 1; i <= 50; i++) {
+    cache.remove(getPedidosCacheKey(i));
+  }
   cache.remove(getPedidosCacheKey());
-  // Remover também versões com limit
-  for (var i = 1; i <= 20; i++) cache.remove(getPedidosCacheKey(i));
 }
 
-// ========== USUÁRIOS COM CACHE ==========
-function getAllUsers() {
-  var cache = CacheService.getScriptCache();
-  var cacheKey = getUsersCacheKey();
-  var cached = cache.get(cacheKey);
-  if (cached) {
-    try { return JSON.parse(cached); } catch(e) { /* fallback */ }
-  }
-  const user = checkUserSession();
-  if (!user || user.role !== CONFIG.ROLES.ADMIN) throw new Error("Acesso negado");
-  const sheet = getSheet(CONFIG.SHEET_NAMES.USUARIOS);
-  if (sheet.getLastRow() < 2) return [];
-  const data = sheet.getDataRange().getValues();
-  const headers = data[0];
-  const users = [];
-  for (let i = 1; i < data.length; i++) {
-    const userObj = {};
-    headers.forEach((h, idx) => { if (h !== 'HashedPassword') userObj[h] = data[i][idx]; });
-    users.push(userObj);
-  }
-  cache.put(cacheKey, JSON.stringify(users), 1200);
-  return users;
-}
 function invalidateUsersCache() {
-  var cache = CacheService.getScriptCache();
+  const cache = CacheService.getScriptCache();
   cache.remove(getUsersCacheKey());
 }
 
-// ========== LOGS COM CACHE ==========
-function getRecentLogs(limit = 10) {
-  var cache = CacheService.getScriptCache();
-  var cacheKey = getLogsCacheKey(limit);
-  var cached = cache.get(cacheKey);
-  if (cached) {
-    try { return JSON.parse(cached); } catch(e) { /* fallback */ }
-  }
-  const sheet = getSheet(CONFIG.SHEET_NAMES.LOGS);
-  if (sheet.getLastRow() < 2) return [];
-  const data = sheet.getDataRange().getValues();
-  const headers = data[0];
-  const logs = [];
-  for (let i = 1; i < data.length; i++) {
-    const logObj = {};
-    headers.forEach((h, idx) => logObj[h] = data[i][idx]);
-    logs.push(logObj);
-  }
-  logs.sort((a, b) => new Date(b.Timestamp) - new Date(a.Timestamp));
-  const logsSerializados = logs.slice(0, limit).map(l => ({
-    LogID: l.LogID,
-    UserID: l.UserID,
-    Acao: l.Acao,
-    Detalhes: l.Detalhes,
-    PedidoID: l.PedidoID,
-    Timestamp: l.Timestamp
-  }));
-  cache.put(cacheKey, JSON.stringify(logsSerializados), 1200);
-  return logsSerializados;
-}
 function invalidateLogsCache() {
-  var cache = CacheService.getScriptCache();
-  for (var i = 1; i <= 20; i++) cache.remove(getLogsCacheKey(i));
+  const cache = CacheService.getScriptCache();
+  for (let i = 1; i <= 20; i++) {
+    cache.remove(getLogsCacheKey(i));
+  }
   cache.remove(getLogsCacheKey());
 }
 
-// ========== INVALIDAÇÃO DE CACHE EM OPERAÇÕES DE ESCRITA ==========
-function saveNewPedido(pedidoData) {
-  const pedidosSheet = getSheet(CONFIG.SHEET_NAMES.PEDIDOS);
-  const itensSheet = getSheet(CONFIG.SHEET_NAMES.ITENS);
+// ===== USUÁRIOS COM CACHE =====
+function getAllUsers() {
+  const cache = CacheService.getScriptCache();
+  const cacheKey = getUsersCacheKey();
+  let cached = cache.get(cacheKey);
+  
+  if (cached) {
+    try { 
+      return JSON.parse(cached); 
+    } catch(e) { 
+      cache.remove(cacheKey);
+    }
+  }
+  
   const user = checkUserSession();
-  const pedidoId = Utilities.getUuid();
-
-  // Calcular valor total
-  let valorTotal = 0;
-  if (pedidoData.itens && pedidoData.itens.length > 0) {
-    valorTotal = pedidoData.itens.reduce((total, item) => {
-      return total + (parseFloat(item.quantidade) * parseFloat(item.valor_unitario));
-    }, 0);
-  }
-
-  const pedidoRow = [
-    pedidoId,
-    pedidoData.numero_pedido || 'N/A',
-    pedidoData.fornecedor,
-    pedidoData.cnpj,
-    new Date(), // DataEnvio
-    pedidoData.data_prevista || null, // DataPrevista
-    CONFIG.STATUS.PENDENTE,
-    user.userId,
-    pedidoData.observacoes || '',
-    '', '', // NF_URL, Boleto_URL
-    null, null, '', // RecebidoPorID, DataRecebimento, ObservacoesRecebimento
-    null, null, '', // RetiradoPorID, DataRetirada, ObservacoesRetirada
-    pedidoData.area_destino || '',
-    pedidoData.prioridade || 'Normal',
-    valorTotal,
-    new Date() // UpdatedAt
-  ];
+  if (!user || user.role !== CONFIG.ROLES.ADMIN) throw new Error("Acesso negado");
   
-  pedidosSheet.appendRow(pedidoRow);
-
-  if (pedidoData.itens && pedidoData.itens.length > 0) {
-    pedidoData.itens.forEach(item => {
-      // Ajustar nomes dos campos para o frontend
-      const descricaoLimpa = limparDescricaoItem(item.descricao || item.Descricao || '');
-      const quantidade = Number(item.quantidade || item.Quantidade || 0);
-      const valorUnitario = Number(item.valor_unitario || item.ValorUnitario || 0);
-      const itemRow = [
-        Utilities.getUuid(),
-        pedidoId,
-        descricaoLimpa, // Descricao
-        quantidade,     // Quantidade
-        0,              // QuantidadeRecebida
-        valorUnitario,  // ValorUnitario
-        CONFIG.STATUS.PENDENTE,
-        '', // Observacoes
-        '' // Divergencias
-      ];
-      itensSheet.appendRow(itemRow);
-    });
-  }
-
-  // Criar notificação para recebedores
-  createNotification(
-    null, // Para todos os recebedores
-    'Novo Pedido',
-    `Novo pedido #${pedidoData.numero_pedido} de ${pedidoData.fornecedor}`,
-    'info',
-    pedidoId
-  );
-
-  logAction(user.userId, 'CREATE_PEDIDO', `Pedido criado: #${pedidoData.numero_pedido}`);
-  invalidatePedidosCache(); // Invalida cache após criar novo pedido
-}
-
-function updatePedidoStatus(pedidoId, novoStatus, observacoes = '', additionalData = {}) {
-  const user = checkUserSession();
-  if (!user) throw new Error("Sessão inválida");
-
-  const pedidosSheet = getSheet(CONFIG.SHEET_NAMES.PEDIDOS);
-  const data = pedidosSheet.getDataRange().getValues();
-  const headers = data[0];
-  
-  const pedidoIdIndex = headers.indexOf('PedidoID');
-  const statusIndex = headers.indexOf('Status');
-  const updatedAtIndex = headers.indexOf('UpdatedAt');
-  
-  for (let i = 1; i < data.length; i++) {
-    if (data[i][pedidoIdIndex] === pedidoId) {
-      const range = pedidosSheet.getRange(i + 1, 1, 1, headers.length);
-      const rowData = range.getValues()[0];
-      
-      // Atualizar status
-      rowData[statusIndex] = novoStatus;
-      rowData[updatedAtIndex] = new Date();
-      
-      // Atualizar campos específicos baseado no status
-      if (novoStatus === CONFIG.STATUS.RECEBIDO) {
-        const recebidoPorIndex = headers.indexOf('RecebidoPorID');
-        const dataRecebimentoIndex = headers.indexOf('DataRecebimento');
-        const obsRecebimentoIndex = headers.indexOf('ObservacoesRecebimento');
-        
-        rowData[recebidoPorIndex] = user.userId;
-        rowData[dataRecebimentoIndex] = new Date();
-        rowData[obsRecebimentoIndex] = observacoes;
-      } else if (novoStatus === CONFIG.STATUS.RETIRADO) {
-        const retiradoPorIndex = headers.indexOf('RetiradoPorID');
-        const dataRetiradaIndex = headers.indexOf('DataRetirada');
-        const obsRetiradaIndex = headers.indexOf('ObservacoesRetirada');
-        
-        rowData[retiradoPorIndex] = user.userId;
-        rowData[dataRetiradaIndex] = new Date();
-        rowData[obsRetiradaIndex] = observacoes;
-      }
-      
-      // Aplicar dados adicionais
-      Object.keys(additionalData).forEach(key => {
-        const index = headers.indexOf(key);
-        if (index !== -1) {
-          rowData[index] = additionalData[key];
-        }
-      });
-      
-      range.setValues([rowData]);
-      
-      logAction(user.userId, 'UPDATE_STATUS', `Pedido ${pedidoId} atualizado para ${novoStatus}`);
-      invalidatePedidosCache(); // Invalida cache após atualizar status
-      return true;
-    }
-  }
-  
-  return false;
-}
-
-function searchPedidos(termoBusca = '', filtros = {}) {
-  try {
-    const termo = (termoBusca || '').trim().toLowerCase();
-    const user = checkUserSession();
-    
-    if (!user) return [];
-    
-    let pedidos = getPedidosComItens();
-    
-    // Filtrar por role
-    if (user.role === CONFIG.ROLES.COMPRADOR) {
-      pedidos = pedidos.filter(p => p.EnviadoPorID === user.userId);
-    }
-    
-    // Aplicar filtros de busca
-    if (termo) {
-      pedidos = pedidos.filter(pedido => {
-        return (
-          (pedido.NumeroPedidoPDF && pedido.NumeroPedidoPDF.toString().toLowerCase().includes(termo)) ||
-          (pedido.Fornecedor && pedido.Fornecedor.toLowerCase().includes(termo)) ||
-          (pedido.CNPJ && pedido.CNPJ.toLowerCase().includes(termo)) ||
-          (pedido.Itens && pedido.Itens.some(item => 
-            item.Descricao && item.Descricao.toLowerCase().includes(termo)
-          ))
-        );
-      });
-    }
-    
-    // Aplicar filtros adicionais
-    if (filtros.status) {
-      pedidos = pedidos.filter(p => p.Status === filtros.status);
-    }
-    
-    if (filtros.prioridade) {
-      pedidos = pedidos.filter(p => p.Prioridade === filtros.prioridade);
-    }
-    
-    return pedidos;
-  } catch (e) {
-    Logger.log('[ERRO] searchPedidos: ' + e.message);
-    return [];
-  }
-}
-
-// =================================================================
-// SEÇÃO DE NOTIFICAÇÕES E LOGS
-// =================================================================
-
-function createNotification(userId, titulo, mensagem, tipo = 'info', pedidoId = null) {
-  const sheet = getSheet(CONFIG.SHEET_NAMES.NOTIFICACOES);
-  
-  if (userId) {
-    // Notificação para usuário específico
-    sheet.appendRow([
-      Utilities.getUuid(),
-      userId,
-      titulo,
-      mensagem,
-      tipo,
-      false,
-      new Date(),
-      pedidoId
-    ]);
-  } else {
-    // Notificação para todos os usuários de uma role específica
-    const usuarios = getAllUsersByRole(CONFIG.ROLES.RECEBEDOR);
-    usuarios.forEach(user => {
-      sheet.appendRow([
-        Utilities.getUuid(),
-        user.UserID,
-        titulo,
-        mensagem,
-        tipo,
-        false,
-        new Date(),
-        pedidoId
-      ]);
-    });
-  }
-}
-
-function getNotifications(userId) {
-  const sheet = getSheet(CONFIG.SHEET_NAMES.NOTIFICACOES);
+  const sheet = getSheet(CONFIG.SHEET_NAMES.USUARIOS);
   if (sheet.getLastRow() < 2) return [];
   
   const data = sheet.getDataRange().getValues();
   const headers = data[0];
-  const notifications = [];
+  const users = [];
   
   for (let i = 1; i < data.length; i++) {
-    const notifObj = {};
-    headers.forEach((h, idx) => notifObj[h] = data[i][idx]);
-    
-    if (notifObj.UserID === userId) {
-      notifications.push(notifObj);
-    }
+    const userObj = {};
+    headers.forEach((h, idx) => { 
+      if (h !== 'HashedPassword') userObj[h] = data[i][idx]; 
+    });
+    users.push(userObj);
   }
   
-  return notifications.sort((a, b) => new Date(b.CreatedAt) - new Date(a.CreatedAt));
-}
-
-function markNotificationAsRead(notifId) {
-  const sheet = getSheet(CONFIG.SHEET_NAMES.NOTIFICACOES);
-  const data = sheet.getDataRange().getValues();
-  const headers = data[0];
-  
-  const notifIdIndex = headers.indexOf('NotifID');
-  const lidaIndex = headers.indexOf('Lida');
-  
-  for (let i = 1; i < data.length; i++) {
-    if (data[i][notifIdIndex] === notifId) {
-      sheet.getRange(i + 1, lidaIndex + 1).setValue(true);
-      break;
-    }
-  }
-}
-
-function logAction(userId, acao, detalhes, pedidoId = null) {
-  const sheet = getSheet(CONFIG.SHEET_NAMES.LOGS);
-  sheet.appendRow([
-    Utilities.getUuid(),
-    userId,
-    acao,
-    detalhes,
-    pedidoId,
-    new Date()
-  ]);
+  cache.put(cacheKey, JSON.stringify(users), CONFIG.CACHE_DURATION);
+  return users;
 }
 
 function getAllUsersByRole(role) {
@@ -950,10 +626,310 @@ function getAllUsersByRole(role) {
   return users;
 }
 
-// =================================================================
-// SEÇÃO DE PDF E GEMINI
-// =================================================================
+// ===== LOGS COM CACHE =====
+function getRecentLogs(limit = 10) {
+  const cache = CacheService.getScriptCache();
+  const cacheKey = getLogsCacheKey(limit);
+  let cached = cache.get(cacheKey);
+  
+  if (cached) {
+    try { 
+      return JSON.parse(cached); 
+    } catch(e) { 
+      cache.remove(cacheKey);
+    }
+  }
+  
+  const sheet = getSheet(CONFIG.SHEET_NAMES.LOGS);
+  if (sheet.getLastRow() < 2) return [];
+  
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const logs = [];
+  
+  for (let i = 1; i < data.length; i++) {
+    const logObj = {};
+    headers.forEach((h, idx) => logObj[h] = data[i][idx]);
+    logs.push(logObj);
+  }
+  
+  logs.sort((a, b) => new Date(b.Timestamp) - new Date(a.Timestamp));
+  const result = logs.slice(0, limit);
+  
+  cache.put(cacheKey, JSON.stringify(result), CONFIG.CACHE_DURATION);
+  return result;
+}
 
+// ===== SALVAR NOVO PEDIDO (MANTENDO INTEGRAÇÃO GEMINI) =====
+function saveNewPedido(pedidoData) {
+  const pedidosSheet = getSheet(CONFIG.SHEET_NAMES.PEDIDOS);
+  const itensSheet = getSheet(CONFIG.SHEET_NAMES.ITENS);
+  const user = checkUserSession();
+  const pedidoId = Utilities.getUuid();
+
+  // Calcular valor total
+  let valorTotal = 0;
+  if (pedidoData.itens && pedidoData.itens.length > 0) {
+    valorTotal = pedidoData.itens.reduce((total, item) => {
+      return total + (parseFloat(item.quantidade) * parseFloat(item.valor_unitario));
+    }, 0);
+  }
+
+  const pedidoRow = [
+    pedidoId,
+    pedidoData.numero_pedido || 'N/A',
+    pedidoData.fornecedor,
+    pedidoData.cnpj,
+    new Date(), // DataEnvio
+    pedidoData.data_prevista || null, // DataPrevista
+    CONFIG.STATUS.PENDENTE,
+    user.userId,
+    pedidoData.observacoes || '',
+    '', '', // NF_URL, Boleto_URL
+    null, null, '', // RecebidoPorID, DataRecebimento, ObservacoesRecebimento
+    null, null, '', // RetiradoPorID, DataRetirada, ObservacoesRetirada
+    pedidoData.area_destino || '',
+    pedidoData.prioridade || 'Normal',
+    valorTotal,
+    new Date() // UpdatedAt
+  ];
+  
+  pedidosSheet.appendRow(pedidoRow);
+
+  if (pedidoData.itens && pedidoData.itens.length > 0) {
+    pedidoData.itens.forEach(item => {
+      const descricaoLimpa = limparDescricaoItem(item.descricao || item.Descricao || '');
+      const quantidade = Number(item.quantidade || item.Quantidade || 0);
+      const valorUnitario = Number(item.valor_unitario || item.ValorUnitario || 0);
+      
+      const itemRow = [
+        Utilities.getUuid(),
+        pedidoId,
+        descricaoLimpa,
+        quantidade,
+        0, // QuantidadeRecebida
+        valorUnitario,
+        CONFIG.STATUS.PENDENTE,
+        '', // Observacoes
+        '' // Divergencias
+      ];
+      itensSheet.appendRow(itemRow);
+    });
+  }
+
+  // Criar notificação para recebedores
+  createNotification(
+    null, // Para todos os recebedores
+    'Novo Pedido',
+    `Novo pedido #${pedidoData.numero_pedido} de ${pedidoData.fornecedor}`,
+    'info',
+    pedidoId
+  );
+
+  logAction(user.userId, 'CREATE_PEDIDO', `Pedido criado: #${pedidoData.numero_pedido}`);
+  invalidatePedidosCache();
+  
+  return { success: true, message: 'Pedido criado com sucesso!' };
+}
+
+// ===== ATUALIZAÇÃO DE STATUS OTIMIZADA =====
+function updatePedidoStatus(pedidoId, novoStatus, observacoes = '', additionalData = {}) {
+  const user = checkUserSession();
+  if (!user) throw new Error("Sessão inválida");
+
+  const pedidosSheet = getSheet(CONFIG.SHEET_NAMES.PEDIDOS);
+  const range = pedidosSheet.getDataRange();
+  const allData = range.getValues();
+  const headers = allData[0];
+  const pedidoIdIndex = headers.indexOf('PedidoID');
+  
+  let rowToUpdate = -1;
+  for (let i = 1; i < allData.length; i++) {
+    if (allData[i][pedidoIdIndex] === pedidoId) {
+      rowToUpdate = i;
+      break;
+    }
+  }
+  
+  if (rowToUpdate !== -1) {
+    allData[rowToUpdate][headers.indexOf('Status')] = novoStatus;
+    allData[rowToUpdate][headers.indexOf('UpdatedAt')] = new Date();
+    
+    if (novoStatus === CONFIG.STATUS.RECEBIDO) {
+      allData[rowToUpdate][headers.indexOf('RecebidoPorID')] = user.userId;
+      allData[rowToUpdate][headers.indexOf('DataRecebimento')] = new Date();
+      allData[rowToUpdate][headers.indexOf('ObservacoesRecebimento')] = observacoes;
+    } else if (novoStatus === CONFIG.STATUS.RETIRADO || novoStatus === CONFIG.STATUS.FINALIZADO) {
+      allData[rowToUpdate][headers.indexOf('RetiradoPorID')] = user.userId;
+      allData[rowToUpdate][headers.indexOf('DataRetirada')] = new Date();
+      allData[rowToUpdate][headers.indexOf('ObservacoesRetirada')] = observacoes;
+    }
+    
+    Object.keys(additionalData).forEach(key => {
+      const index = headers.indexOf(key);
+      if (index !== -1) {
+        allData[rowToUpdate][index] = additionalData[key];
+      }
+    });
+    
+    range.setValues(allData);
+    logAction(user.userId, 'UPDATE_STATUS', `Pedido ${pedidoId} atualizado para ${novoStatus}`);
+    invalidatePedidosCache();
+    return true;
+  }
+  
+  return false;
+}
+
+// ===== BUSCA OTIMIZADA COM PAGINAÇÃO =====
+function getPedidosPaginados(pagina = 1, itensPorPagina = 12, termoBusca = '', filtros = {}) {
+  try {
+    const user = checkUserSession();
+    if (!user) return { html: '<div class="col-span-full text-center text-gray-500 py-8">Nenhum pedido encontrado</div>', totalPaginas: 1, paginaAtual: 1 };
+    
+    let pedidos = getPedidosComItensFiltradosPorRole(user);
+    
+    // Aplicar filtros de busca
+    if (termoBusca) {
+      const termo = termoBusca.trim().toLowerCase();
+      pedidos = pedidos.filter(pedido => {
+        return (
+          (pedido.NumeroPedidoPDF && pedido.NumeroPedidoPDF.toString().toLowerCase().includes(termo)) ||
+          (pedido.Fornecedor && pedido.Fornecedor.toLowerCase().includes(termo)) ||
+          (pedido.CNPJ && pedido.CNPJ.toLowerCase().includes(termo)) ||
+          (pedido.Itens && pedido.Itens.some(item => 
+            item.Descricao && item.Descricao.toLowerCase().includes(termo)
+          ))
+        );
+      });
+    }
+    
+    if (filtros.status) {
+      pedidos = pedidos.filter(p => p.Status === filtros.status);
+    }
+    
+    if (filtros.prioridade) {
+      pedidos = pedidos.filter(p => p.Prioridade === filtros.prioridade);
+    }
+    
+    const total = pedidos.length;
+    const totalPaginas = Math.max(1, Math.ceil(total / itensPorPagina));
+    const inicio = (pagina - 1) * itensPorPagina;
+    const fim = Math.min(inicio + itensPorPagina, total);
+    const pedidosPagina = pedidos.slice(inicio, fim);
+    
+    const html = renderizarGridDePedidosComoHtml(pedidosPagina, user);
+    
+    return { html, totalPaginas, paginaAtual: pagina };
+    
+  } catch (e) {
+    Logger.log('[ERRO] getPedidosPaginados: ' + e.message);
+    return { html: '<div class="col-span-full text-center text-gray-500 py-8">Erro ao buscar pedidos</div>', totalPaginas: 1, paginaAtual: 1 };
+  }
+}
+
+// ===== RENDERIZAÇÃO HTML OTIMIZADA =====
+function renderizarGridDePedidosComoHtml(pedidos, user) {
+  if (!pedidos || pedidos.length === 0) {
+    return '<div class="col-span-full text-center text-gray-500 py-8">Nenhum pedido encontrado</div>';
+  }
+  
+  const formatCurrency = (value) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value || 0);
+  const getStatusBadge = (status) => {
+    const colorMap = {
+      'Pendente': { bg: '#FEF3C7', text: '#F59E0B' },
+      'Em Trânsito': { bg: '#DBEAFE', text: '#3B82F6' },
+      'Recebido': { bg: '#D1FAE5', text: '#10B981' },
+      'Aguardando Retirada': { bg: '#EDE9FE', text: '#8B5CF6' },
+      'Retirado': { bg: '#F3F4F6', text: '#6B7280' },
+      'Finalizado': { bg: '#F3F4F6', text: '#6B7280' },
+      'Cancelado': { bg: '#FEE2E2', text: '#EF4444' }
+    };
+    const c = colorMap[status] || { bg: '#F3F4F6', text: '#6B7280' };
+    return `<span class="badge" style="background-color: ${c.bg}; color: ${c.text};">${status}</span>`;
+  };
+  const getPriorityBadge = (priority) => {
+    const colorMap = {
+      'Normal': { bg: '#DBEAFE', text: '#3B82F6' },
+      'Alta': { bg: '#FEF3C7', text: '#F59E0B' },
+      'Urgente': { bg: '#FEE2E2', text: '#EF4444' }
+    };
+    const c = colorMap[priority] || { bg: '#DBEAFE', text: '#3B82F6' };
+    return `<span class="badge" style="background-color: ${c.bg}; color: ${c.text};">${priority}</span>`;
+  };
+  const formatDateShort = (dateStr) => {
+    if (!dateStr) return 'N/A';
+    try {
+      const d = new Date(dateStr);
+      return Utilities.formatDate(d, Session.getScriptTimeZone(), 'dd/MM/yyyy');
+    } catch(e) { return 'N/A'; }
+  };
+  
+  return pedidos.map(order => {
+    let actions = '';
+    const status = order.Status;
+    
+    if (user.role === 'comprador') {
+      if (status === 'Recebido') {
+        actions += `<button class="btn btn-accent btn-sm" onclick="openStatusModal('${order.PedidoID}', 'definir_retirador')"><i data-feather="user-plus" class="btn-icon-sm"></i> Definir Retirador</button>`;
+      }
+      if (["Pendente", "Em Trânsito"].includes(status)) {
+        actions += `<button class="btn btn-warning btn-sm" onclick="openStatusModal('${order.PedidoID}', 'update_status')"><i data-feather="edit" class="btn-icon-sm"></i> Atualizar Status</button>`;
+      }
+    }
+    
+    if (user.role === 'recebedor') {
+      if (["Pendente", "Em Trânsito"].includes(status)) {
+        actions += `<button class="btn btn-success btn-sm" onclick="openStatusModal('${order.PedidoID}', 'receber')"><i data-feather="check" class="btn-icon-sm"></i> Receber</button>`;
+      }
+    }
+    
+    if (user.role === 'retirador') {
+      if (status === 'Aguardando Retirada' && order.RetiradoPorID === user.userId) {
+        actions += `<button class="btn btn-success btn-sm" onclick="openStatusModal('${order.PedidoID}', 'retirar')"><i data-feather="truck" class="btn-icon-sm"></i> Confirmar Retirada</button>`;
+      }
+    }
+    
+    if (user.role === 'admin') {
+      actions += `<button class="btn btn-warning btn-sm" onclick="openStatusModal('${order.PedidoID}', 'update_status')"><i data-feather="edit" class="btn-icon-sm"></i> Atualizar</button>`;
+    }
+    
+    return `
+      <div class="order-card">
+        <div class="order-header">
+          <h4 class="order-number">Pedido #${order.NumeroPedidoPDF || 'S/N'}</h4>
+          ${getStatusBadge(order.Status)}
+        </div>
+        <div class="order-body">
+          <div class="order-info">
+            <div class="order-info-item">
+              <span class="order-info-label">Fornecedor:</span>
+              <span class="order-info-value">${order.Fornecedor}</span>
+            </div>
+            <div class="order-info-item">
+              <span class="order-info-label">Valor Total:</span>
+              <span class="order-info-value">${formatCurrency(order.ValorTotal)}</span>
+            </div>
+            <div class="order-info-item">
+              <span class="order-info-label">Data Envio:</span>
+              <span class="order-info-value">${formatDateShort(order.DataEnvio)}</span>
+            </div>
+            ${order.Prioridade ? `<div class="order-info-item"><span class="order-info-label">Prioridade:</span><span class="order-info-value">${getPriorityBadge(order.Prioridade)}</span></div>` : ''}
+            ${order.AreaDestino ? `<div class="order-info-item"><span class="order-info-label">Área Destino:</span><span class="order-info-value">${order.AreaDestino}</span></div>` : ''}
+          </div>
+        </div>
+        <div class="order-footer">
+          <button class="btn btn-secondary btn-sm" onclick="openOrderDetails('${order.PedidoID}')">
+            <i data-feather="eye" class="btn-icon-sm"></i> Detalhes
+          </button>
+          ${actions}
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+// ===== INTEGRAÇÃO GEMINI MANTIDA IGUAL =====
 function getPDFFolder() {
   const folders = DriveApp.getFoldersByName(CONFIG.FOLDER_NAME);
   return folders.hasNext() ? folders.next() : DriveApp.createFolder(CONFIG.FOLDER_NAME);
@@ -1018,6 +994,7 @@ function callGeminiAPI(fileInfo) {
       ] 
     }] 
   };
+  
   const options = { 
     'method': 'post', 
     'contentType': 'application/json', 
@@ -1038,14 +1015,14 @@ function callGeminiAPI(fileInfo) {
     if (!parsedData.candidates || !parsedData.candidates[0].content || !parsedData.candidates[0].content.parts[0].text) {
       throw new Error("Resposta da API não contém o campo de texto esperado.");
     }
+    
     let jsonText = parsedData.candidates[0].content.parts[0].text;
-    // Remove blocos markdown se vierem
     const match = jsonText.match(/```json\n([\s\S]*?)\n```/);
     if (match) { jsonText = match[1]; }
+    
     let pedido = JSON.parse(jsonText);
 
-    // === PÓS-PROCESSAMENTO: Filtrar apenas campos essenciais ===
-    // Limpar itens: só descricao, quantidade, valor_unitario, e limpar descricao
+    // Filtrar apenas campos essenciais
     if (pedido && Array.isArray(pedido.itens)) {
       pedido.itens = pedido.itens.map(item => ({
         descricao: limparDescricaoItem(item.descricao || ''),
@@ -1055,7 +1032,7 @@ function callGeminiAPI(fileInfo) {
     } else {
       pedido.itens = [];
     }
-    // Garantir apenas os campos essenciais
+    
     return {
       numero_pedido: pedido.numero_pedido || 'N/A',
       fornecedor: pedido.fornecedor || 'N/A',
@@ -1068,7 +1045,6 @@ function callGeminiAPI(fileInfo) {
 }
 
 function limparDescricaoItem(descricao) {
-  // Remove textos auxiliares comuns
   return descricao
     .replace(/CAM CENTRO.*$/i, '')
     .replace(/SOLICITADO POR.*$/i, '')
@@ -1077,96 +1053,7 @@ function limparDescricaoItem(descricao) {
     .trim();
 }
 
-// =================================================================
-// SEÇÃO DE ADMINISTRAÇÃO
-// =================================================================
-
-function getAllUsers() {
-  const user = checkUserSession();
-  if (!user || user.role !== CONFIG.ROLES.ADMIN) {
-    throw new Error("Acesso negado");
-  }
-  
-  const sheet = getSheet(CONFIG.SHEET_NAMES.USUARIOS);
-  if (sheet.getLastRow() < 2) return [];
-  
-  const data = sheet.getDataRange().getValues();
-  const headers = data[0];
-  const users = [];
-  
-  for (let i = 1; i < data.length; i++) {
-    const userObj = {};
-    headers.forEach((h, idx) => {
-      if (h !== 'HashedPassword') { // Não retornar senha
-        userObj[h] = data[i][idx];
-      }
-    });
-    users.push(userObj);
-  }
-  
-  return users;
-}
-
-function updateUserRole(userId, newRole) {
-  const currentUser = checkUserSession();
-  if (!currentUser || currentUser.role !== CONFIG.ROLES.ADMIN) {
-    throw new Error("Acesso negado");
-  }
-  
-  const sheet = getSheet(CONFIG.SHEET_NAMES.USUARIOS);
-  const range = sheet.getDataRange();
-  const allData = range.getValues();
-  const headers = allData[0];
-  const userIdIndex = headers.indexOf('UserID');
-  const roleIndex = headers.indexOf('Role');
-  let updated = false;
-  for (let i = 1; i < allData.length; i++) {
-    if (allData[i][userIdIndex] === userId) {
-      allData[i][roleIndex] = newRole;
-      updated = true;
-      break;
-    }
-  }
-  if (updated) {
-    range.setValues(allData);
-    logAction(currentUser.userId, 'UPDATE_USER_ROLE', `Role do usuário ${userId} alterada para ${newRole}`);
-    invalidateUsersCache();
-    return { success: true };
-  }
-  return { success: false, message: "Usuário não encontrado" };
-}
-
-function toggleUserStatus(userId) {
-  const currentUser = checkUserSession();
-  if (!currentUser || currentUser.role !== CONFIG.ROLES.ADMIN) {
-    throw new Error("Acesso negado");
-  }
-  const sheet = getSheet(CONFIG.SHEET_NAMES.USUARIOS);
-  const range = sheet.getDataRange();
-  const allData = range.getValues();
-  const headers = allData[0];
-  const userIdIndex = headers.indexOf('UserID');
-  const statusIndex = headers.indexOf('Status');
-  let updated = false;
-  let newStatus = '';
-  for (let i = 1; i < allData.length; i++) {
-    if (allData[i][userIdIndex] === userId) {
-      const currentStatus = allData[i][statusIndex];
-      newStatus = currentStatus === 'Ativo' ? 'Inativo' : 'Ativo';
-      allData[i][statusIndex] = newStatus;
-      updated = true;
-      break;
-    }
-  }
-  if (updated) {
-    range.setValues(allData);
-    logAction(currentUser.userId, 'TOGGLE_USER_STATUS', `Status do usuário ${userId} alterado para ${newStatus}`);
-    invalidateUsersCache();
-    return { success: true, newStatus };
-  }
-  return { success: false, message: "Usuário não encontrado" };
-}
-
+// ===== DASHBOARD STATS =====
 function getDashboardStats() {
   const user = checkUserSession();
   if (!user) throw new Error("Sessão inválida");
@@ -1192,73 +1079,160 @@ function getDashboardStats() {
   return stats;
 }
 
-// =================================================================
-// FUNÇÕES ESPECÍFICAS POR ROLE
-// =================================================================
-
-function updateItemRecebimento(itemId, quantidadeRecebida, observacoes, divergencias) {
-  const user = checkUserSession();
-  if (!user || user.role !== CONFIG.ROLES.RECEBEDOR) {
-    throw new Error("Apenas recebedores podem atualizar itens");
+// ===== NOTIFICAÇÕES =====
+function createNotification(userId, titulo, mensagem, tipo = 'info', pedidoId = null) {
+  const sheet = getSheet(CONFIG.SHEET_NAMES.NOTIFICACOES);
+  
+  if (userId) {
+    sheet.appendRow([
+      Utilities.getUuid(),
+      userId,
+      titulo,
+      mensagem,
+      tipo,
+      false,
+      new Date(),
+      pedidoId
+    ]);
+  } else {
+    const usuarios = getAllUsersByRole(CONFIG.ROLES.RECEBEDOR);
+    usuarios.forEach(user => {
+      sheet.appendRow([
+        Utilities.getUuid(),
+        user.UserID,
+        titulo,
+        mensagem,
+        tipo,
+        false,
+        new Date(),
+        pedidoId
+      ]);
+    });
   }
-  const sheet = getSheet(CONFIG.SHEET_NAMES.ITENS);
+}
+
+function getNotifications(userId) {
+  const sheet = getSheet(CONFIG.SHEET_NAMES.NOTIFICACOES);
+  if (sheet.getLastRow() < 2) return [];
+  
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  const notifications = [];
+  
+  for (let i = 1; i < data.length; i++) {
+    const notifObj = {};
+    headers.forEach((h, idx) => notifObj[h] = data[i][idx]);
+    
+    if (notifObj.UserID === userId) {
+      notifications.push(notifObj);
+    }
+  }
+  
+  return notifications.sort((a, b) => new Date(b.CreatedAt) - new Date(a.CreatedAt));
+}
+
+function markNotificationAsRead(notifId) {
+  const sheet = getSheet(CONFIG.SHEET_NAMES.NOTIFICACOES);
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0];
+  
+  const notifIdIndex = headers.indexOf('NotifID');
+  const lidaIndex = headers.indexOf('Lida');
+  
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][notifIdIndex] === notifId) {
+      sheet.getRange(i + 1, lidaIndex + 1).setValue(true);
+      break;
+    }
+  }
+}
+
+// ===== LOGS =====
+function logAction(userId, acao, detalhes, pedidoId = null) {
+  const sheet = getSheet(CONFIG.SHEET_NAMES.LOGS);
+  sheet.appendRow([
+    Utilities.getUuid(),
+    userId,
+    acao,
+    detalhes,
+    pedidoId,
+    new Date()
+  ]);
+  
+  // Invalidar cache de logs
+  invalidateLogsCache();
+}
+
+// ===== ADMINISTRAÇÃO =====
+function updateUserRole(userId, newRole) {
+  const currentUser = checkUserSession();
+  if (!currentUser || currentUser.role !== CONFIG.ROLES.ADMIN) {
+    throw new Error("Acesso negado");
+  }
+  
+  const sheet = getSheet(CONFIG.SHEET_NAMES.USUARIOS);
   const range = sheet.getDataRange();
   const allData = range.getValues();
   const headers = allData[0];
-  const itemIdIndex = headers.indexOf('ItemID');
-  const qtdRecebidaIndex = headers.indexOf('QuantidadeRecebida');
-  const obsIndex = headers.indexOf('Observacoes');
-  const divergenciasIndex = headers.indexOf('Divergencias');
+  const userIdIndex = headers.indexOf('UserID');
+  const roleIndex = headers.indexOf('Role');
+  
   let updated = false;
   for (let i = 1; i < allData.length; i++) {
-    if (allData[i][itemIdIndex] === itemId) {
-      allData[i][qtdRecebidaIndex] = quantidadeRecebida;
-      allData[i][obsIndex] = observacoes || '';
-      allData[i][divergenciasIndex] = divergencias || '';
+    if (allData[i][userIdIndex] === userId) {
+      allData[i][roleIndex] = newRole;
       updated = true;
       break;
     }
   }
+  
   if (updated) {
     range.setValues(allData);
-    logAction(user.userId, 'UPDATE_ITEM', `Item ${itemId} atualizado no recebimento`);
-    invalidatePedidosCache();
-    return { success: true };
-  }
-  return { success: false, message: "Item não encontrado" };
-}
-
-function definirResponsavelRetirada(pedidoId, responsavelId, areaDestino) {
-  const user = checkUserSession();
-  if (!user || user.role !== CONFIG.ROLES.COMPRADOR) {
-    throw new Error("Apenas compradores podem definir responsável pela retirada");
-  }
-  
-  const success = updatePedidoStatus(pedidoId, CONFIG.STATUS.AGUARDANDO_RETIRADA, '', {
-    'RetiradoPorID': responsavelId,
-    'AreaDestino': areaDestino
-  });
-  
-  if (success) {
-    // Notificar o responsável pela retirada
-    createNotification(
-      responsavelId,
-      'Material Pronto para Retirada',
-      `Material do pedido está pronto para retirada na área: ${areaDestino}`,
-      'success',
-      pedidoId
-    );
-    
+    logAction(currentUser.userId, 'UPDATE_USER_ROLE', `Role do usuário ${userId} alterada para ${newRole}`);
+    invalidateUsersCache();
     return { success: true };
   }
   
-  return { success: false, message: "Erro ao definir responsável" };
+  return { success: false, message: "Usuário não encontrado" };
 }
 
-// =================================================================
-// FUNÇÕES DE RELATÓRIOS
-// =================================================================
+function toggleUserStatus(userId) {
+  const currentUser = checkUserSession();
+  if (!currentUser || currentUser.role !== CONFIG.ROLES.ADMIN) {
+    throw new Error("Acesso negado");
+  }
+  
+  const sheet = getSheet(CONFIG.SHEET_NAMES.USUARIOS);
+  const range = sheet.getDataRange();
+  const allData = range.getValues();
+  const headers = allData[0];
+  const userIdIndex = headers.indexOf('UserID');
+  const statusIndex = headers.indexOf('Status');
+  
+  let updated = false;
+  let newStatus = '';
+  
+  for (let i = 1; i < allData.length; i++) {
+    if (allData[i][userIdIndex] === userId) {
+      const currentStatus = allData[i][statusIndex];
+      newStatus = currentStatus === 'Ativo' ? 'Inativo' : 'Ativo';
+      allData[i][statusIndex] = newStatus;
+      updated = true;
+      break;
+    }
+  }
+  
+  if (updated) {
+    range.setValues(allData);
+    logAction(currentUser.userId, 'TOGGLE_USER_STATUS', `Status do usuário ${userId} alterado para ${newStatus}`);
+    invalidateUsersCache();
+    return { success: true, newStatus };
+  }
+  
+  return { success: false, message: "Usuário não encontrado" };
+}
 
+// ===== RELATÓRIOS =====
 function generateReport(tipo, filtros = {}) {
   const user = checkUserSession();
   if (!user) throw new Error("Sessão inválida");
@@ -1322,8 +1296,7 @@ function generatePerformanceReport(pedidos) {
     pedidosNoPrazo: 0,
     pedidosAtrasados: 0
   };
-  
-  let totalRecebimento = 0;
+    let totalRecebimento = 0;
   let totalRetirada = 0;
   let countRecebimento = 0;
   let countRetirada = 0;
@@ -1357,451 +1330,80 @@ function generatePerformanceReport(pedidos) {
     }
   });
   
-  performance.tempoMedioRecebimento = countRecebimento > 0 ? totalRecebimento / countRecebimento / (1000 * 60 * 60 * 24) : 0; // em dias
-  performance.tempoMedioRetirada = countRetirada > 0 ? totalRetirada / countRetirada / (1000 * 60 * 60 * 24) : 0; // em dias
+  performance.tempoMedioRecebimento = countRecebimento > 0 ? totalRecebimento / countRecebimento / (1000 * 60 * 60 * 24) : 0;
+  performance.tempoMedioRetirada = countRetirada > 0 ? totalRetirada / countRetirada / (1000 * 60 * 60 * 24) : 0;
   
   return performance;
 }
 
+// ===== FUNÇÕES ESPECÍFICAS POR ROLE =====
+function updateItemRecebimento(itemId, quantidadeRecebida, observacoes, divergencias) {
+  const user = checkUserSession();
+  if (!user || user.role !== CONFIG.ROLES.RECEBEDOR) {
+    throw new Error("Apenas recebedores podem atualizar itens");
+  }
+  
+  const sheet = getSheet(CONFIG.SHEET_NAMES.ITENS);
+  const range = sheet.getDataRange();
+  const allData = range.getValues();
+  const headers = allData[0];
+  const itemIdIndex = headers.indexOf('ItemID');
+  const qtdRecebidaIndex = headers.indexOf('QuantidadeRecebida');
+  const obsIndex = headers.indexOf('Observacoes');
+  const divergenciasIndex = headers.indexOf('Divergencias');
+  
+  let updated = false;
+  for (let i = 1; i < allData.length; i++) {
+    if (allData[i][itemIdIndex] === itemId) {
+      allData[i][qtdRecebidaIndex] = quantidadeRecebida;
+      allData[i][obsIndex] = observacoes || '';
+      allData[i][divergenciasIndex] = divergencias || '';
+      updated = true;
+      break;
+    }
+  }
+  
+  if (updated) {
+    range.setValues(allData);
+    logAction(user.userId, 'UPDATE_ITEM', `Item ${itemId} atualizado no recebimento`);
+    invalidatePedidosCache();
+    return { success: true };
+  }
+  
+  return { success: false, message: "Item não encontrado" };
+}
+
+function definirResponsavelRetirada(pedidoId, responsavelId, areaDestino) {
+  const user = checkUserSession();
+  if (!user || user.role !== CONFIG.ROLES.COMPRADOR) {
+    throw new Error("Apenas compradores podem definir responsável pela retirada");
+  }
+  
+  const success = updatePedidoStatus(pedidoId, CONFIG.STATUS.AGUARDANDO_RETIRADA, '', {
+    'RetiradoPorID': responsavelId,
+    'AreaDestino': areaDestino
+  });
+  
+  if (success) {
+    createNotification(
+      responsavelId,
+      'Material Pronto para Retirada',
+      `Material do pedido está pronto para retirada na área: ${areaDestino}`,
+      'success',
+      pedidoId
+    );
+    
+    return { success: true };
+  }
+  
+  return { success: false, message: "Erro ao definir responsável" };
+}
+
+// ===== FUNÇÕES DE TESTE =====
 function ping() {
-  return { ok: true, msg: 'pong' };
+  return { ok: true, msg: 'pong', timestamp: new Date() };
 }
 
 function testLoginUser() {
-  var result = loginUser('email@dominio.com', 'senha');
-  return result;
+  return loginUser('email@dominio.com', 'senha');
 }
-
-function getRecentLogs(limit = 10) {
-  const sheet = getSheet(CONFIG.SHEET_NAMES.LOGS);
-  if (sheet.getLastRow() < 2) return [];
-  const data = sheet.getDataRange().getValues();
-  const headers = data[0];
-  const logs = [];
-  for (let i = 1; i < data.length; i++) {
-    const logObj = {};
-    headers.forEach((h, idx) => logObj[h] = data[i][idx]);
-    logs.push(logObj);
-  }
-  // Ordena do mais recente para o mais antigo
-  logs.sort((a, b) => new Date(b.Timestamp) - new Date(a.Timestamp));
-  return logs.slice(0, limit);
-}
-  
-// ========== SERVER-SIDE RENDERING DE LISTAS ==========
-function renderizarGridDePedidosComoHtml(pedidos, user) {
-  if (!pedidos || pedidos.length === 0) {
-    return '<div class="col-span-full text-center text-gray-500 py-8">Nenhum pedido encontrado</div>';
-  }
-  // Funções auxiliares internas para gerar o HTML
-  const formatCurrency = (value) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value || 0);
-  const getStatusBadge = (status) => {
-    const colorMap = {
-      'Pendente': { bg: '#FEF3C7', text: '#F59E0B' },
-      'Em Trânsito': { bg: '#DBEAFE', text: '#3B82F6' },
-      'Recebido': { bg: '#D1FAE5', text: '#10B981' },
-      'Aguardando Retirada': { bg: '#EDE9FE', text: '#8B5CF6' },
-      'Retirado': { bg: '#F3F4F6', text: '#6B7280' },
-      'Finalizado': { bg: '#F3F4F6', text: '#6B7280' },
-      'Cancelado': { bg: '#FEE2E2', text: '#EF4444' }
-    };
-    const c = colorMap[status] || { bg: '#F3F4F6', text: '#6B7280' };
-    return `<span class="badge" style="background-color: ${c.bg}; color: ${c.text};">${status}</span>`;
-  };
-  const getPriorityBadge = (priority) => {
-    const colorMap = {
-      'Normal': { bg: '#DBEAFE', text: '#3B82F6' },
-      'Alta': { bg: '#FEF3C7', text: '#F59E0B' },
-      'Urgente': { bg: '#FEE2E2', text: '#EF4444' }
-    };
-    const c = colorMap[priority] || { bg: '#DBEAFE', text: '#3B82F6' };
-    return `<span class="badge" style="background-color: ${c.bg}; color: ${c.text};">${priority}</span>`;
-  };
-  const formatDateShort = (dateStr) => {
-    if (!dateStr) return 'N/A';
-    try {
-      const d = new Date(dateStr);
-      return Utilities.formatDate(d, Session.getScriptTimeZone(), 'dd/MM/yyyy');
-    } catch(e) { return 'N/A'; }
-  };
-  return pedidos.map(order => {
-    let actions = '';
-    const status = order.Status;
-    if (user.role === 'comprador') {
-      if (status === 'Recebido') {
-        actions += `<button class="btn btn-accent btn-sm" onclick="openStatusModal('${order.PedidoID}', 'definir_retirador')"><i data-feather="user-plus" class="btn-icon-sm"></i> Definir Retirador</button>`;
-      }
-      if (["Pendente", "Em Trânsito"].includes(status)) {
-        actions += `<button class="btn btn-warning btn-sm" onclick="openStatusModal('${order.PedidoID}', 'update_status')"><i data-feather="edit" class="btn-icon-sm"></i> Atualizar Status</button>`;
-      }
-    }
-    if (user.role === 'recebedor') {
-      if (["Pendente", "Em Trânsito"].includes(status)) {
-        actions += `<button class="btn btn-success btn-sm" onclick="openStatusModal('${order.PedidoID}', 'receber')"><i data-feather="check" class="btn-icon-sm"></i> Receber</button>`;
-      }
-    }
-    if (user.role === 'retirador') {
-      if (status === 'Aguardando Retirada' && order.RetiradoPorID === user.userId) {
-        actions += `<button class="btn btn-success btn-sm" onclick="openStatusModal('${order.PedidoID}', 'retirar')"><i data-feather="truck" class="btn-icon-sm"></i> Confirmar Retirada</button>`;
-      }
-    }
-    if (user.role === 'admin') {
-      actions += `<button class="btn btn-warning btn-sm" onclick="openStatusModal('${order.PedidoID}', 'update_status')"><i data-feather="edit" class="btn-icon-sm"></i> Atualizar</button>`;
-    }
-    return `
-      <div class="order-card">
-        <div class="order-header">
-          <h4 class="order-number">Pedido #${order.NumeroPedidoPDF || 'S/N'}</h4>
-          ${getStatusBadge(order.Status)}
-        </div>
-        <div class="order-body">
-          <div class="order-info">
-            <div class="order-info-item">
-              <span class="order-info-label">Fornecedor:</span>
-              <span class="order-info-value">${order.Fornecedor}</span>
-            </div>
-            <div class="order-info-item">
-              <span class="order-info-label">Valor Total:</span>
-              <span class="order-info-value">${formatCurrency(order.ValorTotal)}</span>
-            </div>
-            <div class="order-info-item">
-              <span class="order-info-label">Data Envio:</span>
-              <span class="order-info-value">${formatDateShort(order.DataEnvio)}</span>
-            </div>
-            ${order.Prioridade ? `<div class="order-info-item"><span class="order-info-label">Prioridade:</span><span class="order-info-value">${getPriorityBadge(order.Prioridade)}</span></div>` : ''}
-            ${order.AreaDestino ? `<div class="order-info-item"><span class="order-info-label">Área Destino:</span><span class="order-info-value">${order.AreaDestino}</span></div>` : ''}
-          </div>
-        </div>
-        <div class="order-footer">
-          <button class="btn btn-secondary btn-sm" onclick="openOrderDetails('${order.PedidoID}')">
-            <i data-feather="eye" class="btn-icon-sm"></i> Detalhes
-          </button>
-          ${actions}
-        </div>
-      </div>
-    `;
-  }).join('');
-}
-
-// ========== FUNÇÃO ÚNICA DE INICIALIZAÇÃO ==========
-function getInitialAppData() {
-  const user = checkUserSession();
-  if (!user) return null;
-  const dashboardStats = getDashboardStats();
-  const notifications = getNotifications(user.userId);
-  const recentOrders = getPedidosComItens(5);
-  return {
-    dashboardStats: dashboardStats,
-    notifications: notifications,
-    recentOrders: recentOrders,
-    user: user
-  };
-}
-  
-// ========== PAGINAÇÃO DE PEDIDOS ==========
-function getPedidosPaginados(pagina = 1, itensPorPagina = 20, termoBusca = '', filtros = {}) {
-  try {
-    const user = checkUserSession();
-    if (!user) return { html: '<div class="col-span-full text-center text-gray-500 py-8">Nenhum pedido encontrado</div>', totalPaginas: 1, paginaAtual: 1 };
-    let pedidos = getPedidosComItens();
-    if (user.role === CONFIG.ROLES.COMPRADOR) {
-      pedidos = pedidos.filter(p => p.EnviadoPorID === user.userId);
-    }
-    if (termoBusca) {
-      const termo = termoBusca.trim().toLowerCase();
-      pedidos = pedidos.filter(pedido => {
-        return (
-          (pedido.NumeroPedidoPDF && pedido.NumeroPedidoPDF.toString().toLowerCase().includes(termo)) ||
-          (pedido.Fornecedor && pedido.Fornecedor.toLowerCase().includes(termo)) ||
-          (pedido.CNPJ && pedido.CNPJ.toLowerCase().includes(termo)) ||
-          (pedido.Itens && pedido.Itens.some(item => 
-            item.Descricao && item.Descricao.toLowerCase().includes(termo)
-          ))
-        );
-      });
-    }
-    if (filtros.status) {
-      pedidos = pedidos.filter(p => p.Status === filtros.status);
-    }
-    if (filtros.prioridade) {
-      pedidos = pedidos.filter(p => p.Prioridade === filtros.prioridade);
-    }
-    const total = pedidos.length;
-    const totalPaginas = Math.max(1, Math.ceil(total / itensPorPagina));
-    const inicio = (pagina - 1) * itensPorPagina;
-    const fim = Math.min(inicio + itensPorPagina, total);
-    const pedidosPagina = pedidos.slice(inicio, fim);
-    const html = renderizarGridDePedidosComoHtml(pedidosPagina, user);
-    return { html, totalPaginas, paginaAtual: pagina };
-  } catch (e) {
-    Logger.log('[ERRO] getPedidosPaginados: ' + e.message);
-    return { html: '<div class="col-span-full text-center text-gray-500 py-8">Erro ao buscar pedidos</div>', totalPaginas: 1, paginaAtual: 1 };
-  }
-}
-  
-// =================================================================
-// OTIMIZAÇÃO DE PERFORMANCE - FUNÇÕES UNIFICADAS E OTIMIZADAS
-// =================================================================
-
-/**
- * Função unificada para carregar todos os dados do painel de uma vez só
- * @param {string} userRole
- * @param {string} userEmail
- * @return {Object}
- */
-function getDadosPainel(userRole, userEmail) {
-  const dados = {
-    pedidos: [],
-    usuarios: [],
-    estatisticas: {},
-    notificacoes: []
-  };
-  try {
-    // Cache para dados que não mudam frequentemente
-    const cache = CacheService.getScriptCache();
-    // Busca pedidos baseado no role
-    switch(userRole) {
-      case 'comprador':
-        dados.pedidos = getPedidosComprador(userEmail);
-        break;
-      case 'recebedor':
-        dados.pedidos = getPedidosRecebimento();
-        break;
-      case 'retirador':
-        dados.pedidos = getPedidosRetirada(userEmail);
-        break;
-      case 'admin':
-        dados.pedidos = getTodosPedidos();
-        break;
-    }
-    // Dados em cache
-    let usuarios = cache.get('usuarios');
-    if (!usuarios) {
-      usuarios = JSON.stringify(getUsuarios());
-      cache.put('usuarios', usuarios, 1800); // 30 min
-    }
-    dados.usuarios = JSON.parse(usuarios);
-    dados.estatisticas = getEstatisticas();
-    dados.notificacoes = getNotificacoes(userEmail);
-    return dados;
-  } catch (error) {
-    Logger.log('Erro em getDadosPainel: ' + error.toString());
-    throw error;
-  }
-}
-
-/**
- * Busca otimizada de todos os pedidos (processa tudo em memória)
- */
-function getPedidosOtimizado() {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Pedidos');
-  const dados = sheet.getDataRange().getValues();
-  if (dados.length <= 1) return [];
-  const headers = dados[0];
-  const pedidos = [];
-  for (let i = 1; i < dados.length; i++) {
-    const pedido = {};
-    headers.forEach((header, index) => {
-      pedido[header] = dados[i][index];
-    });
-    pedidos.push(pedido);
-  }
-  return pedidos;
-}
-
-function getPedidosComprador(emailComprador) {
-  const todosPedidos = getPedidosOtimizado();
-  return todosPedidos.filter(pedido => pedido.EnviadoPorID === emailComprador || pedido.emailComprador === emailComprador);
-}
-
-function getPedidosRecebimento() {
-  const todosPedidos = getPedidosOtimizado();
-  return todosPedidos.filter(pedido => pedido.Status === 'Pendente' || pedido.Status === 'Em Trânsito' || pedido.status === 'Pendente' || pedido.status === 'Em Trânsito');
-}
-
-function getPedidosRetirada(emailRetirador) {
-  const todosPedidos = getPedidosOtimizado();
-  return todosPedidos.filter(pedido => (pedido.Status === 'Aguardando Retirada' || pedido.status === 'Aguardando Retirada') && (pedido.RetiradoPorID === emailRetirador || pedido.retiradorEmail === emailRetirador));
-}
-
-function getTodosPedidos() {
-  return getPedidosOtimizado();
-}
-
-function getUsuarios() {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Usuarios');
-  const dados = sheet.getDataRange().getValues();
-  if (dados.length <= 1) return [];
-  const headers = dados[0];
-  const usuarios = [];
-  for (let i = 1; i < dados.length; i++) {
-    const usuario = {};
-    headers.forEach((header, index) => {
-      usuario[header] = dados[i][index];
-    });
-    usuarios.push(usuario);
-  }
-  return usuarios;
-}
-
-function getEstatisticas() {
-  const pedidos = getPedidosOtimizado();
-  return {
-    total: pedidos.length,
-    pendentes: pedidos.filter(p => p.Status === 'Pendente' || p.status === 'Pendente').length,
-    emTransito: pedidos.filter(p => p.Status === 'Em Trânsito' || p.status === 'Em Trânsito').length,
-    recebidos: pedidos.filter(p => p.Status === 'Recebido' || p.status === 'Recebido').length,
-    aguardandoRetirada: pedidos.filter(p => p.Status === 'Aguardando Retirada' || p.status === 'Aguardando Retirada').length,
-    finalizados: pedidos.filter(p => p.Status === 'Finalizado' || p.status === 'Finalizado').length
-  };
-}
-
-function getUserRole(email) {
-  const usuarios = getUsuarios();
-  const user = usuarios.find(u => u.Email === email || u.email === email);
-  return user ? (user.Role || user.role) : null;
-}
-
-// =================================================================
-// FLUXOS DE PEDIDO (RECEBIMENTO, RETIRADOR, RETIRADA)
-// =================================================================
-
-function confirmarRecebimento(orderId, dadosRecebimento) {
-  const userEmail = Session.getActiveUser().getEmail();
-  const userRole = getUserRole(userEmail);
-  if (userRole !== 'recebedor' && userRole !== 'admin') {
-    throw new Error('Permissão negada. Apenas Recebedores podem confirmar recebimento.');
-  }
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Pedidos');
-  const dados = sheet.getDataRange().getValues();
-  const headers = dados[0];
-  for (let i = 1; i < dados.length; i++) {
-    if (dados[i][0] == orderId) {
-      const statusAtual = dados[i][headers.indexOf('Status')] || dados[i][headers.indexOf('status')];
-      if (statusAtual !== 'Pendente' && statusAtual !== 'Em Trânsito') {
-        throw new Error('Pedido não pode ser recebido no status atual: ' + statusAtual);
-      }
-      dados[i][headers.indexOf('Status')] = 'Recebido';
-      if (headers.indexOf('dataRecebimento') !== -1) dados[i][headers.indexOf('dataRecebimento')] = new Date();
-      if (headers.indexOf('RecebidoPorID') !== -1) dados[i][headers.indexOf('RecebidoPorID')] = userEmail;
-      if (headers.indexOf('observacoesRecebimento') !== -1) dados[i][headers.indexOf('observacoesRecebimento')] = dadosRecebimento.observacoes;
-      if (headers.indexOf('NF_URL') !== -1) dados[i][headers.indexOf('NF_URL')] = dadosRecebimento.linkNF;
-      if (headers.indexOf('Boleto_URL') !== -1) dados[i][headers.indexOf('Boleto_URL')] = dadosRecebimento.linkBoleto;
-      sheet.getDataRange().setValues(dados);
-      registrarLog('RECEBIMENTO', `Pedido ${orderId} recebido por ${userEmail}`);
-      return { success: true, message: 'Recebimento confirmado com sucesso!' };
-    }
-  }
-  throw new Error('Pedido não encontrado: ' + orderId);
-}
-
-function definirRetirador(orderId, retiradorEmail, areaDestino) {
-  const userEmail = Session.getActiveUser().getEmail();
-  const userRole = getUserRole(userEmail);
-  if (userRole !== 'comprador' && userRole !== 'admin') {
-    throw new Error('Permissão negada. Apenas Compradores podem definir retirador.');
-  }
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Pedidos');
-  const dados = sheet.getDataRange().getValues();
-  const headers = dados[0];
-  for (let i = 1; i < dados.length; i++) {
-    if (dados[i][0] == orderId) {
-      const statusAtual = dados[i][headers.indexOf('Status')] || dados[i][headers.indexOf('status')];
-      if (statusAtual !== 'Recebido') {
-        throw new Error('Pedido deve estar "Recebido" para definir retirador. Status atual: ' + statusAtual);
-      }
-      dados[i][headers.indexOf('Status')] = 'Aguardando Retirada';
-      if (headers.indexOf('RetiradoPorID') !== -1) dados[i][headers.indexOf('RetiradoPorID')] = retiradorEmail;
-      if (headers.indexOf('retiradorEmail') !== -1) dados[i][headers.indexOf('retiradorEmail')] = retiradorEmail;
-      if (headers.indexOf('AreaDestino') !== -1) dados[i][headers.indexOf('AreaDestino')] = areaDestino;
-      if (headers.indexOf('areaDestino') !== -1) dados[i][headers.indexOf('areaDestino')] = areaDestino;
-      if (headers.indexOf('dataDefinicaoRetirador') !== -1) dados[i][headers.indexOf('dataDefinicaoRetirador')] = new Date();
-      sheet.getDataRange().setValues(dados);
-      enviarNotificacao(retiradorEmail, 'NOVA_RETIRADA', `Você foi designado para retirar o pedido ${orderId}`);
-      registrarLog('DEFINIR_RETIRADOR', `Retirador ${retiradorEmail} definido para pedido ${orderId} por ${userEmail}`);
-      return { success: true, message: 'Retirador definido com sucesso!' };
-    }
-  }
-  throw new Error('Pedido não encontrado: ' + orderId);
-}
-
-function confirmarRetirada(orderId, observacoes) {
-  const userEmail = Session.getActiveUser().getEmail();
-  const userRole = getUserRole(userEmail);
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Pedidos');
-  const dados = sheet.getDataRange().getValues();
-  const headers = dados[0];
-  for (let i = 1; i < dados.length; i++) {
-    if (dados[i][0] == orderId) {
-      const statusAtual = dados[i][headers.indexOf('Status')] || dados[i][headers.indexOf('status')];
-      const retiradorAtribuido = dados[i][headers.indexOf('RetiradoPorID')] || dados[i][headers.indexOf('retiradorEmail')];
-      if (userRole !== 'admin' && retiradorAtribuido !== userEmail) {
-        throw new Error('Você não é o retirador designado para este pedido.');
-      }
-      if (statusAtual !== 'Aguardando Retirada') {
-        throw new Error('Pedido não está aguardando retirada. Status atual: ' + statusAtual);
-      }
-      dados[i][headers.indexOf('Status')] = 'Finalizado';
-      if (headers.indexOf('dataRetirada') !== -1) dados[i][headers.indexOf('dataRetirada')] = new Date();
-      if (headers.indexOf('observacoesRetirada') !== -1) dados[i][headers.indexOf('observacoesRetirada')] = observacoes;
-      sheet.getDataRange().setValues(dados);
-      const emailComprador = dados[i][headers.indexOf('EnviadoPorID')] || dados[i][headers.indexOf('emailComprador')];
-      enviarNotificacao(emailComprador, 'PEDIDO_FINALIZADO', `Seu pedido ${orderId} foi retirado e entregue`);
-      registrarLog('RETIRADA', `Pedido ${orderId} retirado por ${userEmail}`);
-      return { success: true, message: 'Retirada confirmada com sucesso!' };
-    }
-  }
-  throw new Error('Pedido não encontrado: ' + orderId);
-}
-
-// =================================================================
-// NOTIFICAÇÕES OTIMIZADAS
-// =================================================================
-
-function enviarNotificacao(emailDestino, tipo, mensagem) {
-  try {
-    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Notificacoes');
-    sheet.appendRow([
-      new Date(),
-      emailDestino,
-      tipo,
-      mensagem,
-      false // não lida
-    ]);
-    // Envia email (opcional)
-    const assunto = `Sistema de Pedidos - ${tipo}`;
-    MailApp.sendEmail(emailDestino, assunto, mensagem);
-  } catch (error) {
-    Logger.log('Erro ao enviar notificação: ' + error.toString());
-  }
-}
-
-function getNotificacoes(userEmail) {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Notificacoes');
-  const dados = sheet.getDataRange().getValues();
-  if (dados.length <= 1) return [];
-  const notificacoes = [];
-  for (let i = 1; i < dados.length; i++) {
-    if (dados[i][1] === userEmail && !dados[i][4]) { // não lidas
-      notificacoes.push({
-        data: dados[i][0],
-        tipo: dados[i][2],
-        mensagem: dados[i][3]
-      });
-    }
-  }
-  return notificacoes.slice(-10);
-}
-
-function registrarLog(tipo, mensagem) {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Logs');
-  sheet.appendRow([
-    Utilities.getUuid(),
-    Session.getActiveUser().getEmail(),
-    tipo,
-    mensagem,
-    '',
-    new Date()
-  ]);
-}
-  
