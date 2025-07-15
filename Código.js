@@ -744,62 +744,39 @@ function updatePedidoStatus(pedidoId, novoStatus, observacoes = '', additionalDa
   const pedidoIdIndex = headers.indexOf('PedidoID');
   
   let rowToUpdate = -1;
-  let pedidoOriginal = null;
   for (let i = 1; i < allData.length; i++) {
     if (allData[i][pedidoIdIndex] === pedidoId) {
-      rowToUpdate = i;
-      pedidoOriginal = allData[i];
+      rowToUpdate = i + 1; // A linha no Google Sheets é baseada em 1 (e não 0)
       break;
     }
   }
   
   if (rowToUpdate !== -1) {
-    // Atualiza o status principal do pedido
-    allData[rowToUpdate][headers.indexOf('Status')] = novoStatus;
-    allData[rowToUpdate][headers.indexOf('UpdatedAt')] = new Date();
+    // Atualiza os campos na linha do pedido encontrado
+    pedidosSheet.getRange(rowToUpdate, headers.indexOf('Status') + 1).setValue(novoStatus);
+    pedidosSheet.getRange(rowToUpdate, headers.indexOf('UpdatedAt') + 1).setValue(new Date());
     
-    // Adiciona detalhes com base no novo status
     if (novoStatus === CONFIG.STATUS.RECEBIDO) {
-      allData[rowToUpdate][headers.indexOf('RecebidoPorID')] = user.userId;
-      allData[rowToUpdate][headers.indexOf('DataRecebimento')] = new Date();
-      allData[rowToUpdate][headers.indexOf('ObservacoesRecebimento')] = observacoes;
+      pedidosSheet.getRange(rowToUpdate, headers.indexOf('RecebidoPorID') + 1).setValue(user.userId);
+      pedidosSheet.getRange(rowToUpdate, headers.indexOf('DataRecebimento') + 1).setValue(new Date());
+      pedidosSheet.getRange(rowToUpdate, headers.indexOf('ObservacoesRecebimento') + 1).setValue(observacoes);
     } else if (novoStatus === CONFIG.STATUS.RETIRADO || novoStatus === CONFIG.STATUS.FINALIZADO) {
-      allData[rowToUpdate][headers.indexOf('RetiradoPorID')] = user.userId; // Pode ser sobrescrito pelo additionalData
-      allData[rowToUpdate][headers.indexOf('DataRetirada')] = new Date();
-      allData[rowToUpdate][headers.indexOf('ObservacoesRetirada')] = observacoes;
+      pedidosSheet.getRange(rowToUpdate, headers.indexOf('DataRetirada') + 1).setValue(new Date());
+      pedidosSheet.getRange(rowToUpdate, headers.indexOf('ObservacoesRetirada') + 1).setValue(observacoes);
     }
     
     // Processa dados adicionais (NF_URL, Boleto_URL, etc.)
     Object.keys(additionalData).forEach(key => {
       const index = headers.indexOf(key);
-      if (index !== -1 && key !== 'itensAtualizados') { // Não tenta escrever o array de itens na planilha de pedidos
-        allData[rowToUpdate][index] = additionalData[key];
+      if (index !== -1 && key !== 'itensAtualizados') {
+        pedidosSheet.getRange(rowToUpdate, index + 1).setValue(additionalData[key]);
       }
     });
-    
-    range.setValues(allData);
 
-    // *** NOVA LÓGICA PARA ATUALIZAR ITENS ***
-    // Se 'additionalData' contém a lista de itens, atualiza-os
-    if (additionalData.itensAtualizados && Array.isArray(additionalData.itensAtualizados)) {
-      const itensSheet = getSheet(CONFIG.SHEET_NAMES.ITENS);
-      const itensRange = itensSheet.getDataRange();
-      const todosOsItens = itensRange.getValues();
-      const itensHeaders = todosOsItens[0];
-      const itemIdIndex = itensHeaders.indexOf('ItemID');
-      const qtdRecebidaIndex = itensHeaders.indexOf('QuantidadeRecebida');
-      const divergenciasIndex = itensHeaders.indexOf('Divergencias');
-
-      additionalData.itensAtualizados.forEach(itemAtualizado => {
-        for (let i = 1; i < todosOsItens.length; i++) {
-          if (todosOsItens[i][itemIdIndex] === itemAtualizado.itemId) {
-            todosOsItens[i][qtdRecebidaIndex] = itemAtualizado.quantidadeRecebida;
-            todosOsItens[i][divergenciasIndex] = itemAtualizado.divergencias;
-            break; // Otimização: para de procurar uma vez que acha o item
-          }
-        }
-      });
-      itensRange.setValues(todosOsItens); // Salva todas as atualizações de itens de uma vez
+    // *** LÓGICA OTIMIZADA PARA ATUALIZAR ITENS ***
+    // Se 'additionalData' contém a lista de itens, atualiza-os de forma eficiente
+    if (additionalData.itensAtualizados && Array.isArray(additionalData.itensAtualizados) && additionalData.itensAtualizados.length > 0) {
+      updateItensPedido(additionalData.itensAtualizados);
     }
 
     logAction(user.userId, 'UPDATE_STATUS', `Pedido ${pedidoId} atualizado para ${novoStatus}`);
@@ -810,18 +787,81 @@ function updatePedidoStatus(pedidoId, novoStatus, observacoes = '', additionalDa
   return false;
 }
 
+// Adicione esta nova função ao seu Código.js. Ela otimiza a atualização de itens.
+function updateItensPedido(itensParaAtualizar) {
+  const itensSheet = getSheet(CONFIG.SHEET_NAMES.ITENS);
+  const range = itensSheet.getDataRange();
+  const todosOsItens = range.getValues();
+  const headers = todosOsItens[0];
+  
+  const itemIdIndex = headers.indexOf('ItemID');
+  const qtdRecebidaIndex = headers.indexOf('QuantidadeRecebida');
+  const divergenciasIndex = headers.indexOf('Divergencias');
+  
+  // Mapeia os itens a serem atualizados para fácil acesso
+  const mapaDeItens = {};
+  itensParaAtualizar.forEach(item => {
+    mapaDeItens[item.itemId] = item;
+  });
+  
+  // Percorre a planilha e atualiza apenas as células necessárias
+  for (let i = 1; i < todosOsItens.length; i++) {
+    const currentItemId = todosOsItens[i][itemIdIndex];
+    if (mapaDeItens[currentItemId]) {
+      const itemAtualizado = mapaDeItens[currentItemId];
+      // Modifica apenas as colunas necessárias na matriz de dados
+      todosOsItens[i][qtdRecebidaIndex] = itemAtualizado.quantidadeRecebida;
+      todosOsItens[i][divergenciasIndex] = itemAtualizado.divergencias;
+    }
+  }
+  
+  // Escreve a matriz de dados atualizada de volta na planilha de uma só vez
+  range.setValues(todosOsItens);
+}
 // ===== BUSCA OTIMIZADA COM PAGINAÇÃO =====
-function getPedidosPaginados(pagina = 1, itensPorPagina = 12, termoBusca = '', filtros = {}) {
+function getPedidosPaginados(section, pagina = 1, itensPorPagina = 12, termoBusca = '', filtros = {}) {
   try {
     const user = checkUserSession();
-    if (!user) return { html: '<div class="col-span-full text-center text-gray-500 py-8">Nenhum pedido encontrado</div>', totalPaginas: 1, paginaAtual: 1 };
+    if (!user) {
+        return { html: '<div class="col-span-full text-center text-gray-500 py-8">Sessão inválida</div>', totalPaginas: 1, paginaAtual: 1 };
+    }
     
-    let pedidos = getPedidosComItensFiltradosPorRole(user);
-    
-    // Aplicar filtros de busca
+    let todosOsPedidos = getPedidosComItens(); // Busca todos os pedidos
+    let pedidosFiltrados = [];
+
+    // --- LÓGICA DE FILTRO POR PAINEL (SECTION) ---
+    // Esta é a correção principal: filtramos os pedidos com base no painel que o usuário está vendo.
+    switch (section) {
+        case 'buyer':
+            // O painel do comprador mostra APENAS os pedidos que ele mesmo enviou.
+            pedidosFiltrados = todosOsPedidos.filter(p => p.EnviadoPorID === user.userId);
+            break;
+            
+        case 'receiver':
+            // O painel de recebimento mostra APENAS pedidos pendentes ou em trânsito.
+            pedidosFiltrados = todosOsPedidos.filter(p => 
+                [CONFIG.STATUS.PENDENTE, CONFIG.STATUS.EM_TRANSITO].includes(p.Status)
+            );
+            break;
+            
+        case 'retirador':
+            // O painel de retirada mostra APENAS pedidos que estão aguardando retirada ou que já foram retirados pelo usuário logado.
+            pedidosFiltrados = todosOsPedidos.filter(p => 
+                [CONFIG.STATUS.AGUARDANDO_RETIRADA, CONFIG.STATUS.RETIRADO, CONFIG.STATUS.FINALIZADO].includes(p.Status)
+                 && p.RetiradoPorID === user.userId // Mostra apenas os pedidos designados a ele
+            );
+            break;
+            
+        default:
+            // Caso padrão (como no Dashboard), pode-se usar a lógica antiga por Role.
+            pedidosFiltrados = getPedidosComItensFiltradosPorRole(user);
+            break;
+    }
+
+    // Aplicar filtros de busca de texto (após o filtro de painel)
     if (termoBusca) {
       const termo = termoBusca.trim().toLowerCase();
-      pedidos = pedidos.filter(pedido => {
+      pedidosFiltrados = pedidosFiltrados.filter(pedido => {
         return (
           (pedido.NumeroPedidoPDF && pedido.NumeroPedidoPDF.toString().toLowerCase().includes(termo)) ||
           (pedido.Fornecedor && pedido.Fornecedor.toLowerCase().includes(termo)) ||
@@ -833,19 +873,21 @@ function getPedidosPaginados(pagina = 1, itensPorPagina = 12, termoBusca = '', f
       });
     }
     
+    // Aplicar filtros de status e prioridade do formulário
     if (filtros.status) {
-      pedidos = pedidos.filter(p => p.Status === filtros.status);
+      pedidosFiltrados = pedidosFiltrados.filter(p => p.Status === filtros.status);
     }
     
     if (filtros.prioridade) {
-      pedidos = pedidos.filter(p => p.Prioridade === filtros.prioridade);
+      pedidosFiltrados = pedidosFiltrados.filter(p => p.Prioridade === filtros.prioridade);
     }
     
-    const total = pedidos.length;
+    // Paginação
+    const total = pedidosFiltrados.length;
     const totalPaginas = Math.max(1, Math.ceil(total / itensPorPagina));
     const inicio = (pagina - 1) * itensPorPagina;
     const fim = Math.min(inicio + itensPorPagina, total);
-    const pedidosPagina = pedidos.slice(inicio, fim);
+    const pedidosPagina = pedidosFiltrados.slice(inicio, fim);
     
     const html = renderizarGridDePedidosComoHtml(pedidosPagina, user);
     
@@ -853,7 +895,95 @@ function getPedidosPaginados(pagina = 1, itensPorPagina = 12, termoBusca = '', f
     
   } catch (e) {
     Logger.log('[ERRO] getPedidosPaginados: ' + e.message);
-    return { html: '<div class="col-span-full text-center text-gray-500 py-8">Erro ao buscar pedidos</div>', totalPaginas: 1, paginaAtual: 1 };
+    return { html: `<div class="col-span-full text-center text-red-500 py-8">Erro ao buscar pedidos: ${e.message}</div>`, totalPaginas: 1, paginaAtual: 1 };
+  }
+}
+
+function getPedidoById(pedidoId) {
+  try {
+    const pedidosSheet = getSheet(CONFIG.SHEET_NAMES.PEDIDOS);
+    const itensSheet = getSheet(CONFIG.SHEET_NAMES.ITENS);
+    const usuariosSheet = getSheet(CONFIG.SHEET_NAMES.USUARIOS);
+    
+    // Carrega todos os dados de uma vez para otimizar
+    const pedidosData = pedidosSheet.getDataRange().getValues();
+    const itensData = itensSheet.getDataRange().getValues();
+    const usuariosData = usuariosSheet.getDataRange().getValues();
+
+    const pedidosHeaders = pedidosData[0];
+    const itensHeaders = itensData[0];
+    const usuariosHeaders = usuariosData[0];
+
+    // Mapear usuários para fácil acesso (ID -> Nome)
+    const usuariosMap = usuariosData.slice(1).reduce((acc, row) => {
+        const userId = row[usuariosHeaders.indexOf('UserID')];
+        const nome = row[usuariosHeaders.indexOf('Nome')];
+        if (userId) acc[userId] = nome;
+        return acc;
+    }, {});
+
+    // Encontrar o pedido
+    const pedidoIdIndex = pedidosHeaders.indexOf('PedidoID');
+    let pedidoRow = null;
+    for (let i = 1; i < pedidosData.length; i++) {
+        if (pedidosData[i][pedidoIdIndex] === pedidoId) {
+            pedidoRow = pedidosData[i];
+            break;
+        }
+    }
+
+    if (!pedidoRow) {
+        return null;
+    }
+
+    // Mapear os dados do pedido para um objeto
+    const pedidoObj = pedidosHeaders.reduce((obj, header, index) => {
+        obj[header] = pedidoRow[index];
+        return obj;
+    }, {});
+    
+    // Encontrar os itens do pedido
+    const itemIdIndex = itensHeaders.indexOf('PedidoID');
+    const itensDoPedido = [];
+    for (let i = 1; i < itensData.length; i++) {
+        if (itensData[i][itemIdIndex] === pedidoId) {
+            const itemObj = itensHeaders.reduce((obj, header, index) => {
+                obj[header] = itensData[i][index];
+                return obj;
+            }, {});
+            itensDoPedido.push(itemObj);
+        }
+    }
+
+    // Montar o objeto final de retorno
+    const pedidoFinal = {
+        PedidoID: pedidoObj.PedidoID,
+        NumeroPedidoPDF: String(pedidoObj.NumeroPedidoPDF || ''),
+        Fornecedor: pedidoObj.Fornecedor || '',
+        CNPJ: String(pedidoObj.CNPJ || ''),
+        Status: pedidoObj.Status || '',
+        DataEnvio: pedidoObj.DataEnvio ? String(pedidoObj.DataEnvio) : '',
+        ValorTotal: Number(pedidoObj.ValorTotal) || 0,
+        Prioridade: pedidoObj.Prioridade || '',
+        AreaDestino: pedidoObj.AreaDestino || '',
+        EnviadoPorNome: usuariosMap[pedidoObj.EnviadoPorID] || 'N/A',
+        RecebidoPorNome: usuariosMap[pedidoObj.RecebidoPorID] || 'N/A',
+        RetiradoPorNome: usuariosMap[pedidoObj.RetiradoPorID] || 'N/A',
+        ObservacoesRecebimento: pedidoObj.ObservacoesRecebimento || '',
+        Itens: itensDoPedido.map(item => ({
+            ItemID: item.ItemID,
+            Descricao: item.Descricao || '',
+            Quantidade: Number(item.Quantidade) || 0,
+            ValorUnitario: Number(item.ValorUnitario) || 0,
+            QuantidadeRecebida: Number(item.QuantidadeRecebida) || 0
+        }))
+    };
+    
+    return pedidoFinal;
+
+  } catch (error) {
+      Logger.log(`Erro em getPedidoById: ${error.toString()}`);
+      throw new Error(`Não foi possível buscar os detalhes do pedido. Erro: ${error.message}`);
   }
 }
 
@@ -898,30 +1028,39 @@ function renderizarGridDePedidosComoHtml(pedidos, user) {
     let actions = '';
     const status = order.Status;
     
+    // --- LÓGICA DE AÇÕES POR PERFIL ---
+    
+    // Ação para o COMPRADOR
     if (user.role === 'comprador') {
       if (status === 'Recebido') {
         actions += `<button class="btn btn-accent btn-sm" onclick="openStatusModal('${order.PedidoID}', 'definir_retirador')"><i data-feather="user-plus" class="btn-icon-sm"></i> Definir Retirador</button>`;
       }
-      if (["Pendente", "Em Trânsito"].includes(status)) {
-        actions += `<button class="btn btn-warning btn-sm" onclick="openStatusModal('${order.PedidoID}', 'update_status')"><i data-feather="edit" class="btn-icon-sm"></i> Atualizar Status</button>`;
+      // O comprador pode cancelar um pedido pendente
+      if (status === "Pendente") {
+        actions += `<button class="btn btn-danger btn-sm" onclick="openStatusModal('${order.PedidoID}', 'update_status')"><i data-feather="x-circle" class="btn-icon-sm"></i> Cancelar</button>`;
       }
     }
     
+    // Ação para o RECEBEDOR
     if (user.role === 'recebedor') {
       if (["Pendente", "Em Trânsito"].includes(status)) {
         actions += `<button class="btn btn-success btn-sm" onclick="openStatusModal('${order.PedidoID}', 'receber')"><i data-feather="check" class="btn-icon-sm"></i> Receber</button>`;
       }
     }
     
+    // Ação para o RETIRADOR
     if (user.role === 'retirador') {
       if (status === 'Aguardando Retirada' && order.RetiradoPorID === user.userId) {
         actions += `<button class="btn btn-success btn-sm" onclick="openStatusModal('${order.PedidoID}', 'retirar')"><i data-feather="truck" class="btn-icon-sm"></i> Confirmar Retirada</button>`;
       }
     }
     
+    // Ação para o ADMIN (pode atualizar qualquer pedido)
     if (user.role === 'admin') {
-      actions += `<button class="btn btn-warning btn-sm" onclick="openStatusModal('${order.PedidoID}', 'update_status')"><i data-feather="edit" class="btn-icon-sm"></i> Atualizar</button>`;
+      actions += `<button class="btn btn-warning btn-sm" onclick="openStatusModal('${order.PedidoID}', 'update_status')"><i data-feather="edit" class="btn-icon-sm"></i> Atualizar Status</button>`;
     }
+    
+    // --- FIM DA LÓGICA DE AÇÕES ---
     
     return `
       <div class="order-card">

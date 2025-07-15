@@ -2995,7 +2995,7 @@ function searchPedidos(section, pagina = 1) {
     if (statusFilter) filtros.status = statusFilter;
     if (priorityFilter) filtros.prioridade = priorityFilter;
     
-    let loaderTimeout = setTimeout(() => showLoader(true, 'Buscando pedidos...'), 300);
+        let loaderTimeout = setTimeout(() => showLoader(true, 'Buscando pedidos...'), 300);
     
     google.script.run
         .withSuccessHandler(result => {
@@ -3013,7 +3013,8 @@ function searchPedidos(section, pagina = 1) {
             showLoader(false);
             handleError(error);
         })
-        .getPedidosPaginados(pagina, 12, searchTerm, filtros);
+        // AQUI ESTÁ A MUDANÇA: passamos a 'section' para o servidor
+        .getPedidosPaginados(section, pagina, 12, searchTerm, filtros);
 }
 
 function renderPagination(section, paginaAtual, totalPaginas) {
@@ -3171,55 +3172,101 @@ function displayOrderDetails(order) {
 
 // ===== STATUS MANAGEMENT =====
 function openStatusModal(pedidoId, action) {
-    const order = AppState.pedidos.find(p => p.PedidoID === pedidoId) || AppState.currentPedidoDetails;
-    if (!order || !DOM.statusPedidoId || !DOM.additionalFields || !DOM.statusModalTitle || !DOM.statusSelect || !DOM.statusObservacoes || !DOM.statusModal) return;
+    showLoader(true, 'Carregando dados do pedido...');
     
-    DOM.statusPedidoId.value = pedidoId;
+    google.script.run
+        .withSuccessHandler(order => {
+            showLoader(false);
+            
+            if (!order || !order.PedidoID) {
+                showNotification('Erro: Pedido não encontrado no servidor.', 'error');
+                return;
+            }
+
+            AppState.currentPedidoDetails = order;
+
+            if (!DOM.statusPedidoId || !DOM.additionalFields || !DOM.statusModalTitle || !DOM.statusSelect || !DOM.statusObservacoes || !DOM.statusModal) {
+                 console.error("Um ou mais elementos do modal de status não foram encontrados no DOM.");
+                 return;
+            }
+
+            DOM.statusPedidoId.value = pedidoId;
+            DOM.additionalFields.innerHTML = '';
+            
+            let title = 'Atualizar Status do Pedido';
+            let statusOptions = '';
+            
+            // --- LÓGICA DE GERAÇÃO DE OPÇÕES DE STATUS ---
+            // Para o admin, que usa 'update_status', mostramos todas as opções.
+            // Para os outros perfis, a ação já define o status correto (ex: 'receber' -> 'Recebido').
+            if (action === 'update_status' && AppState.user.role === 'admin') {
+                const todosOsStatus = [
+                    "Pendente", "Em Trânsito", "Recebido", 
+                    "Aguardando Retirada", "Retirado", "Finalizado", "Cancelado"
+                ];
+                
+                statusOptions = todosOsStatus.map(s => 
+                    // Marca o status atual do pedido como selecionado
+                    `<option value="${s}" ${order.Status === s ? 'selected' : ''}>${s}</option>`
+                ).join('');
+
+            } else {
+                // Lógica para os outros perfis com botões específicos
+                switch (action) {
+                    case 'receber':
+                        title = 'Confirmar Recebimento do Pedido';
+                        statusOptions = `<option value="Recebido" selected>Recebido</option>`;
+                        setupReceiveFields(order);
+                        break;
+                    case 'retirar':
+                        title = 'Confirmar Retirada do Pedido';
+                        statusOptions = `<option value="Retirado">Retirado</option><option value="Finalizado" selected>Finalizado (Entregue)</option>`;
+                        setupRetireFields(order);
+                        break;
+                    case 'definir_retirador':
+                        title = 'Definir Responsável pela Retirada';
+                        statusOptions = `<option value="Aguardando Retirada" selected>Aguardando Retirada</option>`;
+                        setupRetiradorFields();
+                        break;
+                }
+            }
+            
+            DOM.statusModalTitle.textContent = title;
+            DOM.statusSelect.innerHTML = statusOptions;
+            DOM.statusObservacoes.value = '';
+
+            // Para o admin, adiciona um listener para carregar campos extras dinamicamente
+            if (action === 'update_status' && AppState.user.role === 'admin') {
+                DOM.statusSelect.onchange = () => setupDynamicFields(DOM.statusSelect.value, order);
+                // Chama a função uma vez para carregar os campos do status atual
+                setupDynamicFields(order.Status, order);
+            } else {
+                DOM.statusSelect.onchange = null;
+            }
+            
+            DOM.statusModal.classList.remove('hidden');
+            DOM.statusModal.classList.add('show');
+        })
+        .withFailureHandler(handleError)
+        .getPedidoById(pedidoId);
+}
+
+// ADICIONE esta nova função de ajuda dentro da tag <script> do seu index.html.
+// Ela é responsável por carregar os campos extras quando o admin troca o status no modal.
+function setupDynamicFields(status, order) {
     DOM.additionalFields.innerHTML = '';
-    
-    let title = '';
-    let statusOptions = '';
-    
-    switch (action) {
-        case 'receber':
-            title = 'Confirmar Recebimento';
-            statusOptions = '<option value="Recebido">Recebido</option>';
+    switch (status) {
+        case 'Recebido':
             setupReceiveFields(order);
             break;
-            
-        case 'retirar':
-            title = 'Confirmar Retirada';
-            statusOptions = '<option value="Retirado">Retirado</option><option value="Finalizado">Finalizado</option>';
-            setupRetireFields(order);
-            break;
-            
-        case 'definir_retirador':
-            title = 'Definir Responsável pela Retirada';
-            statusOptions = '<option value="Aguardando Retirada">Aguardando Retirada</option>';
+        case 'Aguardando Retirada':
             setupRetiradorFields();
             break;
-            
-        case 'update_status':
-        default:
-            title = 'Atualizar Status do Pedido';
-            statusOptions = `
-                <option value="">Selecione um status</option>
-                <option value="Pendente">Pendente</option>
-                <option value="Em Trânsito">Em Trânsito</option>
-                <option value="Recebido">Recebido</option>
-                <option value="Aguardando Retirada">Aguardando Retirada</option>
-                <option value="Retirado">Retirado</option>
-                <option value="Finalizado">Finalizado</option>
-                <option value="Cancelado">Cancelado</option>
-            `;
+        case 'Retirado':
+        case 'Finalizado':
+            setupRetireFields(order);
             break;
     }
-    
-    DOM.statusModalTitle.textContent = title;
-    DOM.statusSelect.innerHTML = statusOptions;
-    DOM.statusObservacoes.value = '';
-    
-    DOM.statusModal.classList.remove('hidden');
 }
 
 function setupReceiveFields(order) {
@@ -3376,7 +3423,9 @@ function handleStatusUpdate(event) {
 }
 
 function collectReceiveData() {
-    const order = AppState.currentPedidoDetails || AppState.pedidos.find(p => p.PedidoID === DOM.statusPedidoId?.value);
+    const pedidoId = DOM.statusPedidoId?.value;
+    // Tenta encontrar o pedido no estado global primeiro para evitar buscas desnecessárias
+    const order = AppState.currentPedidoDetails?.PedidoID === pedidoId ? AppState.currentPedidoDetails : AppState.pedidos.find(p => p.PedidoID === pedidoId);
     
     const data = {
         'NF_URL': document.getElementById('nf-url')?.value || '',
@@ -3386,21 +3435,20 @@ function collectReceiveData() {
     
     if (order && order.Itens) {
         order.Itens.forEach(item => {
-            const qtdInput = document.querySelector(`[name="qtd_recebida_${item.ItemID}"]`);
-            const divInput = document.querySelector(`[name="divergencias_${item.ItemID}"]`);
+            const qtdInput = document.querySelector(`input[name="qtd_recebida_${item.ItemID}"]`);
+            const divInput = document.querySelector(`input[name="divergencias_${item.ItemID}"]`);
             
+            // Verifica se os campos existem antes de tentar ler
             if (qtdInput) {
-                // Adiciona os dados de cada item ao array
                 data.itensAtualizados.push({
                     itemId: item.ItemID,
                     quantidadeRecebida: qtdInput.value,
-                    divergencias: divInput?.value || ''
+                    divergencias: divInput ? divInput.value : ''
                 });
             }
         });
     }
     
-    // A função agora só retorna o objeto com todos os dados
     return data;
 }
 
