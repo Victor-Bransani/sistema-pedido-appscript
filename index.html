@@ -2871,6 +2871,94 @@ function renderRecentOrders(orders) {
     `).join('');
 }
 
+function renderOrdersGrid(containerElement, orders, user) {
+    if (!containerElement) return;
+
+    containerElement.innerHTML = ''; // Limpa o container uma única vez antes de adicionar novos elementos
+
+    if (!orders || orders.length === 0) {
+        containerElement.innerHTML = '<div class="col-span-full text-center text-gray-500 py-8">Nenhum pedido encontrado</div>';
+        feather.replace(); // Recarrega os ícones se houver elementos novos (neste caso, o texto)
+        return;
+    }
+
+    const fragment = document.createDocumentFragment();
+
+    orders.forEach(order => {
+        const orderCardDiv = document.createElement('div');
+        orderCardDiv.className = 'order-card';
+
+        // --- LÓGICA PARA GERAR HTML DE UM ÚNICO CARD (replicada do backend, mas agora no frontend) ---
+        let actions = '';
+        const status = order.Status;
+
+        // Ação para o COMPRADOR
+        if (user.role === ROLES.COMPRADOR) {
+            if (status === STATUS.RECEBIDO) {
+                actions += `<button class="btn btn-accent btn-sm" onclick="openStatusModal('${order.PedidoID}', 'definir_retirador')"><i data-feather="user-plus" class="btn-icon-sm"></i> Definir Retirador</button>`;
+            }
+            if (status === STATUS.PENDENTE) {
+                actions += `<button class="btn btn-danger btn-sm" onclick="openStatusModal('${order.PedidoID}', 'update_status')"><i data-feather="x-circle" class="btn-icon-sm"></i> Cancelar</button>`;
+            }
+        }
+
+        // Ação para o RECEBEDOR
+        if (user.role === ROLES.RECEBEDOR) {
+            if ([STATUS.PENDENTE, STATUS.EM_TRANSITO].includes(status)) {
+                actions += `<button class="btn btn-success btn-sm" onclick="openStatusModal('${order.PedidoID}', 'receber')"><i data-feather="check" class="btn-icon-sm"></i> Receber</button>`;
+            }
+        }
+
+        // Ação para o RETIRADOR
+        if (user.role === ROLES.RETIRADOR) {
+            if (status === STATUS.AGUARDANDO_RETIRADA && order.RetiradoPorID === user.userId) {
+                actions += `<button class="btn btn-success btn-sm" onclick="openStatusModal('${order.PedidoID}', 'retirar')"><i data-feather="truck" class="btn-icon-sm"></i> Confirmar Retirada</button>`;
+            }
+        }
+
+        // Ação para o ADMIN
+        if (user.role === ROLES.ADMIN) {
+            actions += `<button class="btn btn-warning btn-sm" onclick="openStatusModal('${order.PedidoID}', 'update_status')"><i data-feather="edit" class="btn-icon-sm"></i> Atualizar Status</button>`;
+        }
+        // --- FIM DA LÓGICA PARA GERAR HTML DE UM ÚNICO CARD ---
+
+        orderCardDiv.innerHTML = `
+            <div class="order-header">
+                <h4 class="order-number">Pedido #${order.NumeroPedidoPDF || 'S/N'}</h4>
+                ${getStatusBadge(order.Status)}
+            </div>
+            <div class="order-body">
+                <div class="order-info">
+                    <div class="order-info-item">
+                        <span class="order-info-label">Fornecedor:</span>
+                        <span class="order-info-value">${order.Fornecedor}</span>
+                    </div>
+                    <div class="order-info-item">
+                        <span class="order-info-label">Valor Total:</span>
+                        <span class="order-info-value">${formatCurrency(order.ValorTotal)}</span>
+                    </div>
+                    <div class="order-info-item">
+                        <span class="order-info-label">Data Envio:</span>
+                        <span class="order-info-value">${formatDateShort(order.DataEnvio)}</span>
+                    </div>
+                    ${order.Prioridade ? `<div class="order-info-item"><span class="order-info-label">Prioridade:</span><span class="order-info-value">${getPriorityBadge(order.Prioridade)}</span></div>` : ''}
+                    ${order.AreaDestino ? `<div class="order-info-item"><span class="order-info-label">Área Destino:</span><span class="order-info-value">${order.AreaDestino}</span></div>` : ''}
+                </div>
+            </div>
+            <div class="order-footer">
+                <button class="btn btn-secondary btn-sm" onclick="openOrderDetails('${order.PedidoID}')">
+                    <i data-feather="eye" class="btn-icon-sm"></i> Detalhes
+                </button>
+                ${actions}
+            </div>
+        `;
+        fragment.appendChild(orderCardDiv);
+    });
+
+    containerElement.appendChild(fragment); // Anexa todos os cards de uma vez ao DOM
+    feather.replace(); // Recarrega os ícones uma única vez após todas as inserções
+}
+
 function renderStatusChart(stats) {
     if (!DOM.statusChartCanvas) return;
     
@@ -2986,34 +3074,45 @@ function searchPedidos(section, pagina = 1) {
         receiver: DOM.receiverOrdersContainer,
         retirador: DOM.retiradorOrdersContainer
     };
-    
+
     const searchTerm = searchInputs[section]?.value || '';
     const statusFilter = statusFilters[section]?.value || '';
     const priorityFilter = priorityFilters[section]?.value || '';
-    
+
     const filtros = {};
     if (statusFilter) filtros.status = statusFilter;
     if (priorityFilter) filtros.prioridade = priorityFilter;
-    
-        let loaderTimeout = setTimeout(() => showLoader(true, 'Buscando pedidos...'), 300);
-    
+
+    let loaderTimeout = setTimeout(() => showLoader(true, 'Buscando pedidos...'), 300);
+
+    console.time('Tempo de Execução da Ação ' + section);
+
     google.script.run
         .withSuccessHandler(result => {
             clearTimeout(loaderTimeout);
             showLoader(false);
+
+            if (result.error) {
+                showNotification(result.error, 'error');
+                return;
+            }
+
             const container = containers[section];
             if (container) {
-                container.innerHTML = result.html;
-                feather.replace();
+                // --- MUDANÇA AQUI: Renderiza os pedidos usando a nova função ---
+                renderOrdersGrid(container, result.pedidos, AppState.user);
             }
             renderPagination(section, result.paginaAtual, result.totalPaginas);
+
+             console.timeEnd('Tempo de Execução da Ação ' + section);
         })
         .withFailureHandler(error => {
             clearTimeout(loaderTimeout);
             showLoader(false);
             handleError(error);
+
+            console.timeEnd('Tempo de Execução da Ação ' + section);
         })
-        // AQUI ESTÁ A MUDANÇA: passamos a 'section' para o servidor
         .getPedidosPaginados(section, pagina, 12, searchTerm, filtros);
 }
 
